@@ -1,0 +1,6 @@
+{
+    "server": "https://your-algosec-server",
+    "username": "your_username",
+    "password": "your_password",
+    "verify_ssl": true
+}

@@ -1,0 +1,4 @@
+subject,description,sources,destinations,services,action,devices,template
+Ouverture HTTPS PROD,Flux web vers serveur prod,10.0.1.0/24,192.168.100.10,https|tcp/8443,Allow,FW-PROD-01,Basic Change Traffic Request
+Acces SSH Admin,Flux SSH depuis jump host,10.0.0.5,172.16.0.0/24,tcp/22,Allow,FW-MGMT-01,Basic Change Traffic Request
+Flux DNS interne,Autoriser DNS vers serveurs internes,10.0.0.0/16,10.10.10.53|10.10.10.54,udp/53|tcp/53,Allow,,Basic Change Traffic Request
