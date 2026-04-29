@@ -1,5 +1,6 @@
 {
     "server": "https://your-algosec-server",
+    "api_path": "/aff/api/external",
     "username": "your_username",
     "password": "your_password",
     "domain": "0",

@@ -18,7 +18,11 @@ class AlgosecClient:
         with open(config_path, "r") as f:
             config = json.load(f)
 
-        self.base_url = config["server"].rstrip("/") + "/FireFlow/api"
+        self.server = config["server"].rstrip("/")
+        # Path API FireFlow. Selon la version : "/FireFlow/api" (ancien) ou "/aff/api/external" (recent).
+        # Si non specifie, on commence avec "/FireFlow/api" et on auto-aligne sur le Path du cookie d'auth.
+        self.api_path = config.get("api_path", "/FireFlow/api")
+        self.base_url = self.server + self.api_path
         self.username = config["username"]
         self.password = config["password"]
         # Domain FireFlow (souvent "0" pour le domaine par defaut)
@@ -58,8 +62,11 @@ class AlgosecClient:
         self.session_id = data["data"]["sessionId"]
 
         # Capture tous les cookies poses par le serveur (sans tenir compte du Path/Domain)
+        cookie_paths = set()
         for c in response.cookies:
             self.cookies[c.name] = c.value
+            if c.path:
+                cookie_paths.add(c.path)
 
         # Fallback : si aucun cookie pose, on essaie les noms standards avec le sessionId JSON
         if not self.cookies:
@@ -71,6 +78,16 @@ class AlgosecClient:
 
         if self.debug:
             print(f"[DEBUG] Set-Cookie headers bruts: {response.headers.get('Set-Cookie')}")
+
+        # Auto-aligne le base_url sur le Path du cookie si different.
+        # Exemple : auth a /FireFlow/api mais cookie scope sur /aff/api/external -> on bascule.
+        if cookie_paths:
+            most_specific = sorted(cookie_paths, key=len, reverse=True)[0]
+            if not self.api_path.rstrip("/").endswith(most_specific.rstrip("/")):
+                old = self.base_url
+                self.api_path = most_specific
+                self.base_url = self.server + self.api_path
+                print(f"[INFO] Path API auto-aligne sur le cookie: {old} -> {self.base_url}")
 
         return self.session_id
 
