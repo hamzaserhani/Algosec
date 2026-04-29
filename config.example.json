@@ -2,5 +2,23 @@
     "server": "https://your-algosec-server",
     "username": "your_username",
     "password": "your_password",
-    "verify_ssl": true
+    "verify_ssl": true,
+    "reporting": {
+        "templates": [
+            "Mon Template Custom 1",
+            "Mon Template Custom 2"
+        ],
+        "sla_hours": {
+            "Mon Template Custom 1": {
+                "Plan": 24,
+                "Risk Check": 8,
+                "Implement": 48,
+                "Validate": 24
+            },
+            "Mon Template Custom 2": {
+                "Approval": 12,
+                "Deploy": 72
+            }
+        }
+    }
 }
