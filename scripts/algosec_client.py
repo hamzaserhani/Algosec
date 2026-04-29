@@ -56,13 +56,28 @@ class AlgosecClient:
             "Cookie": f"FireFlow_Session={self.session_id}"
         }
 
+    def _raise_with_body(self, response, method, url):
+        """Raise HTTPError en incluant le body de la reponse pour le diagnostic."""
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            body = ""
+            try:
+                body = json.dumps(response.json(), indent=2, ensure_ascii=False)
+            except Exception:
+                body = response.text[:2000]
+            raise requests.HTTPError(
+                f"{method} {url} -> {response.status_code}\n--- Response body ---\n{body}",
+                response=response,
+            ) from e
+
     def post(self, endpoint, payload):
         """Effectue un POST authentifie."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         response = requests.post(
             url, json=payload, headers=self._get_headers(), verify=self.verify_ssl
         )
-        response.raise_for_status()
+        self._raise_with_body(response, "POST", url)
         return response.json()
 
     def get(self, endpoint):
@@ -71,7 +86,7 @@ class AlgosecClient:
         response = requests.get(
             url, headers=self._get_headers(), verify=self.verify_ssl
         )
-        response.raise_for_status()
+        self._raise_with_body(response, "GET", url)
         return response.json()
 
 

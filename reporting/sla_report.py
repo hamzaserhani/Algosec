@@ -91,30 +91,65 @@ def extract_phases(ticket):
     return phases
 
 
+def _extract_tickets_from_response(result):
+    """Normalise la reponse FireFlow en liste de tickets."""
+    if not isinstance(result, dict):
+        return []
+    data = result.get("data", result)
+    if isinstance(data, dict):
+        for k in ("changeRequests", "tickets", "items", "results"):
+            if k in data and isinstance(data[k], list):
+                return data[k]
+        return [data] if data else []
+    if isinstance(data, list):
+        return data
+    return []
+
+
 def fetch_tickets_list(client, since, until):
-    """Recupere la liste des tickets dans la fenetre de dates."""
+    """Recupere la liste des tickets dans la fenetre de dates.
+
+    Tente plusieurs endpoints car FireFlow expose le listing de differentes
+    facons selon la version :
+      1. POST change-requests/search (recommande, endpoint standard)
+      2. GET  change-requests?createdFrom=...&createdTo=... (versions recentes)
+    """
     print(f"\n[...] Liste des tickets ({since.date()} -> {until.date()})...")
 
-    params = [
-        ("createdFrom", since.strftime("%Y-%m-%d")),
-        ("createdTo", until.strftime("%Y-%m-%d")),
+    since_s = since.strftime("%Y-%m-%d")
+    until_s = until.strftime("%Y-%m-%d")
+
+    attempts = [
+        ("POST", "change-requests/search", {
+            "fromDate": since_s,
+            "toDate": until_s,
+        }),
+        ("POST", "change-requests/search", {
+            "filter": {"createDateFrom": since_s, "createDateTo": until_s},
+        }),
+        ("GET", f"change-requests?createdFrom={since_s}&createdTo={until_s}", None),
     ]
-    query = "&".join(f"{k}={v}" for k, v in params)
-    result = client.get(f"change-requests?{query}")
 
-    if result.get("status") != "Success":
-        msgs = result.get("messages", [])
-        err = msgs[0]["message"] if msgs else "Erreur inconnue"
-        print(f"[ERREUR] Echec liste: {err}")
-        return []
+    last_err = None
+    for method, endpoint, payload in attempts:
+        try:
+            print(f"  -> essai {method} {endpoint}")
+            result = client.post(endpoint, payload) if method == "POST" else client.get(endpoint)
+            tickets = _extract_tickets_from_response(result)
+            print(f"[OK] {len(tickets)} ticket(s) recupere(s) via {method} {endpoint}.")
+            return tickets
+        except Exception as e:
+            last_err = e
+            msg = str(e).splitlines()[0]
+            print(f"  [echec] {msg}")
 
-    data = result.get("data", {})
-    tickets = data.get("changeRequests", data) if isinstance(data, dict) else data
-    if not isinstance(tickets, list):
-        tickets = [tickets]
-
-    print(f"[OK] {len(tickets)} ticket(s) recupere(s).")
-    return tickets
+    print(f"\n[ERREUR] Aucun endpoint de listing n'a fonctionne.")
+    print(f"  Derniere erreur:\n{last_err}")
+    print(f"\n[INFO] Verifie:")
+    print(f"  - tes permissions FireFlow (le compte doit pouvoir lister/chercher des tickets)")
+    print(f"  - la version de l'API (l'endpoint exact varie selon FireFlow)")
+    print(f"  - le body de l'erreur ci-dessus pour le format attendu")
+    return []
 
 
 def fetch_ticket_details(client, ticket_id):
