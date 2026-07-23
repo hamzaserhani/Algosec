@@ -281,6 +281,7 @@ def main():
     parser.add_argument("--delay", type=float, default=1.0, help="Delai entre requetes (s)")
     parser.add_argument("--history-dir", default="request_history", help="Dossier d'historique JSON")
     parser.add_argument("--force", action="store_true", help="Recree meme si deja dans l'historique")
+    parser.add_argument("--template", help="Force le template FireFlow (sinon celui du CSV / defaut)")
 
     args = parser.parse_args()
 
@@ -328,7 +329,7 @@ def main():
             services=ticket["services"],
             action=ticket["action"],
             devices=ticket["devices"],
-            template=ticket["template"],
+            template=args.template or ticket["template"],
         )
 
         if args.dry_run:
