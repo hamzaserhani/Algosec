@@ -19,6 +19,7 @@ def build_traffic_payload(
     sources=None,
     destinations=None,
     services=None,
+    users=None,
     action="Allow",
     devices=None,
     template="Basic Change Traffic Request",
@@ -49,6 +50,9 @@ def build_traffic_payload(
         },
         "service": {
             "items": [{"name": svc} for svc in (services or ["any"])]
+        },
+        "user": {
+            "items": [{"name": u} for u in (users or ["any"])]
         },
         "application": {
             "items": [{"name": application}]

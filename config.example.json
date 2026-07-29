@@ -6,6 +6,7 @@
     "domain": "0",
     "verify_ssl": true,
     "template": "Nom Exact Du Template Active",
+    "user": "any",
     "reporting": {
         "templates": [
             "Mon Template Custom 1",

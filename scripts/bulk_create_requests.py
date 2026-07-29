@@ -327,6 +327,7 @@ def main():
             sources=ticket["sources"],
             destinations=ticket["destinations"],
             services=ticket["services"],
+            users=[client.default_user],
             action=ticket["action"],
             devices=ticket["devices"],
             template=args.template or client.default_template,
