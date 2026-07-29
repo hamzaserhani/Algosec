@@ -329,7 +329,7 @@ def main():
             services=ticket["services"],
             action=ticket["action"],
             devices=ticket["devices"],
-            template=args.template or ticket["template"],
+            template=args.template or client.default_template,
         )
 
         if args.dry_run:

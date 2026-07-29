@@ -28,6 +28,9 @@ class AlgosecClient:
         # Domain FireFlow (souvent "0" pour le domaine par defaut)
         self.domain = str(config.get("domain", "0"))
         self.verify_ssl = config.get("verify_ssl", True)
+        # Template FireFlow par defaut pour la creation de tickets (optionnel).
+        # Peut etre surcharge en CLI. Si absent -> "Basic Change Traffic Request".
+        self.default_template = config.get("template") or "Basic Change Traffic Request"
         self.session_id = None
         # Cookies captures depuis la reponse d'auth, envoyes manuellement sur chaque appel
         # (on ne se fie pas au cookie jar pour eviter les soucis de scoping Path/Domain).
