@@ -24,6 +24,7 @@ def build_traffic_payload(
     devices=None,
     template="Basic Change Traffic Request",
     application="any",
+    custom_fields=None,
     nat_source=None,
     nat_destination=None,
     nat_port=None,
@@ -39,6 +40,16 @@ def build_traffic_payload(
         fields.append({"key": "Change Request Description", "values": [description]})
     if devices:
         fields.append({"name": "devices", "values": devices if isinstance(devices, list) else [devices]})
+
+    # Champs personnalises obligatoires selon le template/workflow FireFlow
+    # (ex: "MSI code", "Design val number", "Permanent"). Fournis via config.json.
+    for cf in (custom_fields or []):
+        name = cf.get("name")
+        values = cf.get("values")
+        if isinstance(values, (str, int, float, bool)):
+            values = [str(values)]
+        if name and values:
+            fields.append({"name": name, "values": [str(v) for v in values]})
 
     # Lignes de trafic
     traffic_line = {

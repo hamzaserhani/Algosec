@@ -7,6 +7,11 @@
     "verify_ssl": true,
     "template": "Nom Exact Du Template Active",
     "user": "any",
+    "fields": {
+        "MSI code": "REMPLIR",
+        "Design val number": "REMPLIR",
+        "Permanent": "Yes"
+    },
     "reporting": {
         "templates": [
             "Mon Template Custom 1",

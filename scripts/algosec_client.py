@@ -34,6 +34,9 @@ class AlgosecClient:
         # Utilisateur par defaut pour la ligne de trafic (requis si l'option
         # FireFlow ShowUserFieldInCreateForm est activee). Defaut -> "any".
         self.default_user = config.get("user") or "any"
+        # Champs personnalises obligatoires du template (ex: MSI code, Permanent).
+        # Format config.json: {"fields": {"MSI code": "...", "Permanent": "Yes"}}
+        self.custom_fields = config.get("fields") or {}
         self.session_id = None
         # Cookies captures depuis la reponse d'auth, envoyes manuellement sur chaque appel
         # (on ne se fie pas au cookie jar pour eviter les soucis de scoping Path/Domain).

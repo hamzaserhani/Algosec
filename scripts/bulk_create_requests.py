@@ -331,6 +331,10 @@ def main():
             action=ticket["action"],
             devices=ticket["devices"],
             template=args.template or client.default_template,
+            custom_fields=[
+                {"name": name, "values": value}
+                for name, value in client.custom_fields.items()
+            ],
         )
 
         if args.dry_run:
