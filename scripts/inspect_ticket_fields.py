@@ -18,7 +18,42 @@ Usage:
 import argparse
 import json
 
+import requests
+
 from algosec_client import AlgosecClient
+
+
+# Endpoints de lecture FireFlow par type de formulaire. On les essaie dans
+# l'ordre jusqu'a ce que l'un reponde (chaque type a son propre endpoint).
+READ_ENDPOINTS = [
+    ("Traffic Change", "change-requests/traffic/{id}"),
+    ("Generic Change", "change-requests/generic/{id}"),
+    ("Object Change", "object-change-requests/{id}"),
+    ("Rule Removal", "rule-removal-change-requests/{id}"),
+]
+
+
+def fetch_ticket(client, ticket_id):
+    """Essaie chaque endpoint de lecture et renvoie (type, result) du premier qui marche."""
+    attempts = []
+    for form_type, template in READ_ENDPOINTS:
+        endpoint = template.format(id=ticket_id)
+        try:
+            result = client.get(endpoint)
+        except requests.HTTPError as e:
+            # 400 INVALID_FORM_TYPE = mauvais endpoint pour ce type -> on continue
+            body = ""
+            if e.response is not None:
+                try:
+                    body = json.dumps(e.response.json().get("messages", ""))
+                except Exception:
+                    body = (e.response.text or "")[:200]
+            attempts.append(f"{form_type}: {body[:120]}")
+            continue
+        if result.get("status") == "Success":
+            return form_type, result, attempts
+        attempts.append(f"{form_type}: {result.get('messages')}")
+    return None, None, attempts
 
 
 # Cles possibles selon les versions FireFlow pour le nom et la valeur d'un champ
@@ -65,15 +100,16 @@ def extract_fields(node, found, path=""):
 
 
 def inspect(client, ticket_id, raw=False, json_path=None):
-    print(f"\n[...] GET du ticket #{ticket_id}...")
-    # Endpoint officiel de lecture FireFlow: change-requests/generic/{id}
-    result = client.get(f"change-requests/generic/{ticket_id}")
+    print(f"\n[...] GET du ticket #{ticket_id} (detection du type de formulaire)...")
+    form_type, result, attempts = fetch_ticket(client, ticket_id)
 
-    if result.get("status") != "Success":
-        messages = result.get("messages", [])
-        error_msg = messages[0]["message"] if messages else "Erreur inconnue"
-        print(f"[ERREUR] Impossible de recuperer #{ticket_id}: {error_msg}")
+    if result is None:
+        print(f"[ERREUR] Aucun endpoint n'a pu lire le ticket #{ticket_id}. Tentatives:")
+        for a in attempts:
+            print(f"   - {a}")
         return
+
+    print(f"[OK] Lu via l'endpoint: {form_type}")
 
     # La reponse 'generic' renvoie les infos sous forme de champs {name, values}.
     # On extrait donc a partir de toute la reponse (pas seulement result["data"]).
@@ -106,6 +142,7 @@ def inspect(client, ticket_id, raw=False, json_path=None):
     print(f"\n=== Ticket #{ticket_id} ===")
     print(f"  Sujet    : {field_by('subject', 'Subject')}")
     print(f"  Statut   : {field_by('status', 'Status')}")
+    print(f"  Type     : {form_type}")
     print(f"  Template : {field_by('Ticket Template Name', 'template', 'Workflow', 'Form Type')}")
 
     print(f"\n=== Champs detectes ({len(seen)}) ===")
