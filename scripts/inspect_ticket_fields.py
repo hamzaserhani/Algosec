@@ -159,6 +159,10 @@ def inspect(client, ticket_id, raw=False, json_path=None):
         "creator", "requestor", "lastupdated", "form type", "workflow",
         "status", "redirecturl", "initial plan status", "ticket template name",
         "id", "changerequestid", "resolved", "owner", "createdate",
+        # Champs calcules / workflow (lecture seule) - a ne pas envoyer a la creation
+        "risk level", "risks number", "validation result details",
+        "approveengineer", "approvetime", "implementtime", "implementengineer",
+        "requested url category", "change url category",
     }
     skeleton = {name: value for name, (value, _) in seen.items()
                 if name.lower() not in system}
