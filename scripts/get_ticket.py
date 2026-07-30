@@ -16,7 +16,7 @@ def get_ticket(client, ticket_id):
     """Recupere les details d'un ticket par son ID."""
     print(f"\n[...] Recuperation du ticket #{ticket_id}...")
 
-    result = client.get(f"change-requests/{ticket_id}")
+    result = client.get(f"change-requests/generic/{ticket_id}")
 
     if result.get("status") == "Success":
         data = result.get("data", {})

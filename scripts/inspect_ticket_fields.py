@@ -66,7 +66,8 @@ def extract_fields(node, found, path=""):
 
 def inspect(client, ticket_id, raw=False, json_path=None):
     print(f"\n[...] GET du ticket #{ticket_id}...")
-    result = client.get(f"change-requests/{ticket_id}")
+    # Endpoint officiel de lecture FireFlow: change-requests/generic/{id}
+    result = client.get(f"change-requests/generic/{ticket_id}")
 
     if result.get("status") != "Success":
         messages = result.get("messages", [])
@@ -74,21 +75,16 @@ def inspect(client, ticket_id, raw=False, json_path=None):
         print(f"[ERREUR] Impossible de recuperer #{ticket_id}: {error_msg}")
         return
 
-    data = result.get("data", {}) or {}
+    # La reponse 'generic' renvoie les infos sous forme de champs {name, values}.
+    # On extrait donc a partir de toute la reponse (pas seulement result["data"]).
+    data = result.get("data", result) or result
 
     if json_path:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
         print(f"[OK] Reponse brute sauvee dans {json_path}")
 
-    # Infos generales
-    template = data.get("template") or data.get("workflow") or data.get("templateName") or "?"
-    print(f"\n=== Ticket #{ticket_id} ===")
-    print(f"  Sujet    : {data.get('subject', '?')}")
-    print(f"  Statut   : {data.get('status', '?')}")
-    print(f"  Template : {template}")
-
-    # Champs
+    # Champs (extraction recursive sur toute la reponse)
     found = []
     extract_fields(data, found)
 
@@ -97,6 +93,20 @@ def inspect(client, ticket_id, raw=False, json_path=None):
     for name, value, path in found:
         if name not in seen:
             seen[name] = (value, path)
+
+    # Recherche insensible a la casse d'un champ par nom (pour l'en-tete)
+    def field_by(*names):
+        lut = {n.lower(): v for n, (v, _) in seen.items()}
+        for n in names:
+            if n.lower() in lut:
+                return lut[n.lower()]
+        return "?"
+
+    # Infos generales (au niveau racine OU dans les champs)
+    print(f"\n=== Ticket #{ticket_id} ===")
+    print(f"  Sujet    : {field_by('subject', 'Subject')}")
+    print(f"  Statut   : {field_by('status', 'Status')}")
+    print(f"  Template : {field_by('Ticket Template Name', 'template', 'Workflow', 'Form Type')}")
 
     print(f"\n=== Champs detectes ({len(seen)}) ===")
     print(f"{'NOM DU CHAMP':<40} {'VALEUR ACTUELLE':<30} EMPLACEMENT")
