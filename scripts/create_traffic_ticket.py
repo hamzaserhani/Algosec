@@ -25,6 +25,7 @@ def build_traffic_payload(
     template="Basic Change Traffic Request",
     application="any",
     custom_fields=None,
+    line_fields=None,
     nat_source=None,
     nat_destination=None,
     nat_port=None,
@@ -43,13 +44,15 @@ def build_traffic_payload(
 
     # Champs personnalises obligatoires selon le template/workflow FireFlow
     # (ex: "MSI code", "Design val number", "Permanent"). Fournis via config.json.
+    # IMPORTANT: au niveau ticket, FireFlow attend "key" (et non "name") pour
+    # matcher le champ du template.
     for cf in (custom_fields or []):
         name = cf.get("name")
         values = cf.get("values")
         if isinstance(values, (str, int, float, bool)):
             values = [str(values)]
         if name and values:
-            fields.append({"name": name, "values": [str(v) for v in values]})
+            fields.append({"key": name, "values": [str(v) for v in values]})
 
     # Lignes de trafic
     traffic_line = {
@@ -70,6 +73,19 @@ def build_traffic_payload(
         },
         "action": action,
     }
+
+    # Champs personnalises au niveau de la ligne de trafic
+    # (ex: "Justification per traffic line"). IMPORTANT: ici FireFlow attend "name".
+    line_field_items = []
+    for lf in (line_fields or []):
+        name = lf.get("name")
+        values = lf.get("values")
+        if isinstance(values, (str, int, float, bool)):
+            values = [str(values)]
+        if name and values:
+            line_field_items.append({"name": name, "values": [str(v) for v in values]})
+    if line_field_items:
+        traffic_line["fields"] = line_field_items
 
     # NAT (optionnel)
     if nat_source or nat_destination or nat_port:

@@ -335,6 +335,10 @@ def main():
                 {"name": name, "values": value}
                 for name, value in client.custom_fields.items()
             ],
+            line_fields=[
+                {"name": name, "values": value}
+                for name, value in client.traffic_fields.items()
+            ],
         )
 
         if args.dry_run:

@@ -5,12 +5,18 @@
     "password": "your_password",
     "domain": "0",
     "verify_ssl": true,
-    "template": "Nom Exact Du Template Active",
-    "user": "any",
+    "template": "NPS - Firewall Rule Request - Add Firewall Rule - Helix Integration",
+    "user": "Any",
+    "_comment_fields": "Champs AU NIVEAU TICKET (envoyes avec 'key'). Utiliser le nom EXACT du champ tel que retourne par inspect_ticket_fields.py.",
     "fields": {
-        "MSI code": "REMPLIR",
-        "Design val number": "REMPLIR",
-        "Permanent": "Yes"
+        "NPS - Firewall Rule Request - Add Firewall Rule - MSI code": "REMPLIR",
+        "NPS - Firewall Rule Request - Add Firewall Rule - Design val number": "REMPLIR",
+        "NPS - Firewall Rule Request - Add Firewall Rule - Permanent": "Yes",
+        "CMS ticket id - CF": "REMPLIR"
+    },
+    "_comment_traffic_fields": "Champs AU NIVEAU LIGNE DE TRAFIC (envoyes avec 'name').",
+    "traffic_fields": {
+        "NPS - Firewall Rule Request - Add Firewall Rule - Justification per traffic line": "REMPLIR"
     },
     "reporting": {
         "templates": [
