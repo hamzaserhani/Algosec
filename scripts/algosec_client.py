@@ -4,6 +4,8 @@ Client AlgoSec FireFlow - Authentification et gestion de session.
 
 import json
 import os
+from urllib.parse import urlparse
+
 import requests
 import urllib3
 
@@ -38,9 +40,14 @@ class AlgosecClient:
         # Format config.json: {"fields": {"MSI code": "...", "Permanent": "Yes"}}
         self.custom_fields = config.get("fields") or {}
         self.session_id = None
-        # Cookies captures depuis la reponse d'auth, envoyes manuellement sur chaque appel
-        # (on ne se fie pas au cookie jar pour eviter les soucis de scoping Path/Domain).
-        self.cookies = {}
+
+        # Session persistante : le cookie jar gere automatiquement le scope
+        # Path/Domain et capture les cookies rotes a chaque reponse (auth + appels).
+        # Indispensable : certains endpoints (GET) rejettent un cookie rejoue
+        # manuellement (BAD_COOKIE_HEADER) alors que le POST l'accepte.
+        self.session = requests.Session()
+        self.session.verify = self.verify_ssl
+
         # Active la log des requetes via env var ALGOSEC_DEBUG=1
         self.debug = os.environ.get("ALGOSEC_DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -48,7 +55,7 @@ class AlgosecClient:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     def authenticate(self):
-        """Authentification, capture du sessionId et des cookies de la reponse."""
+        """Authentification, capture du sessionId. Les cookies sont geres par la Session."""
         url = f"{self.base_url}/authentication/authenticate"
         payload = {
             "username": self.username,
@@ -57,9 +64,9 @@ class AlgosecClient:
         }
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
-        response = requests.post(
-            url, json=payload, headers=headers, verify=self.verify_ssl
-        )
+        response = self.session.post(url, json=payload, headers=headers)
+        if self.debug:
+            print(f"[DEBUG] Set-Cookie (auth): {response.headers.get('Set-Cookie')}")
         response.raise_for_status()
 
         data = response.json()
@@ -70,23 +77,19 @@ class AlgosecClient:
 
         self.session_id = data["data"]["sessionId"]
 
-        # Capture tous les cookies poses par le serveur (sans tenir compte du Path/Domain)
-        cookie_paths = set()
-        for c in response.cookies:
-            self.cookies[c.name] = c.value
-            if c.path:
-                cookie_paths.add(c.path)
+        # Les cookies poses par le serveur sont deja dans self.session.cookies.
+        # On recupere leurs Path pour l'auto-alignement du base_url.
+        cookie_paths = {c.path for c in self.session.cookies if c.path}
 
-        # Fallback : si aucun cookie pose, on essaie les noms standards avec le sessionId JSON
-        if not self.cookies:
+        # Fallback : si le serveur n'a pose aucun cookie, on injecte le sessionId
+        # sous les noms candidats dans le jar (scope sur le host du serveur).
+        if not len(self.session.cookies):
+            host = urlparse(self.server).hostname
             for name in self.COOKIE_CANDIDATES:
-                self.cookies[name] = self.session_id
+                self.session.cookies.set(name, self.session_id, domain=host)
 
-        cookie_summary = ", ".join(f"{n}={v[:8]}..." for n, v in self.cookies.items())
+        cookie_summary = ", ".join(f"{c.name}={(c.value or '')[:8]}..." for c in self.session.cookies)
         print(f"[OK] Authentification reussie. Session ID: {self.session_id[:8]}... | Cookies: {cookie_summary}")
-
-        if self.debug:
-            print(f"[DEBUG] Set-Cookie headers bruts: {response.headers.get('Set-Cookie')}")
 
         # Auto-aligne le base_url sur le Path du cookie si different.
         # Exemple : auth a /FireFlow/api mais cookie scope sur /aff/api/external -> on bascule.
@@ -104,17 +107,12 @@ class AlgosecClient:
         if not self.session_id:
             raise Exception("Non authentifie. Appelez authenticate() d'abord.")
 
-    def _build_cookie_header(self):
-        """Construit le header Cookie a partir des cookies captures."""
-        return "; ".join(f"{name}={value}" for name, value in self.cookies.items())
-
     def _get_headers(self):
-        """Headers communs : JSON + cookie de session manuel."""
+        """Headers communs : JSON. Les cookies sont ajoutes par la Session."""
         self._ensure_authenticated()
         return {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Cookie": self._build_cookie_header(),
         }
 
     def _raise_with_body(self, response, method, url):
@@ -132,12 +130,12 @@ class AlgosecClient:
                 response=response,
             ) from e
 
-    def _log_debug(self, method, url, headers, payload=None):
+    def _log_debug(self, method, url, payload=None):
         if not self.debug:
             return
-        safe_headers = {k: (v[:30] + "..." if k == "Cookie" and len(v) > 30 else v) for k, v in headers.items()}
+        cookies = "; ".join(f"{c.name}={(c.value or '')[:12]}..." for c in self.session.cookies)
         print(f"[DEBUG] {method} {url}")
-        print(f"[DEBUG]   headers: {safe_headers}")
+        print(f"[DEBUG]   cookies envoyes: {cookies}")
         if payload is not None:
             print(f"[DEBUG]   body: {json.dumps(payload)[:300]}")
 
@@ -145,8 +143,8 @@ class AlgosecClient:
         """Effectue un POST authentifie."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         headers = self._get_headers()
-        self._log_debug("POST", url, headers, payload)
-        response = requests.post(url, json=payload, headers=headers, verify=self.verify_ssl)
+        self._log_debug("POST", url, payload)
+        response = self.session.post(url, json=payload, headers=headers)
         self._raise_with_body(response, "POST", url)
         return response.json()
 
@@ -154,8 +152,8 @@ class AlgosecClient:
         """Effectue un GET authentifie."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         headers = self._get_headers()
-        self._log_debug("GET", url, headers)
-        response = requests.get(url, headers=headers, verify=self.verify_ssl)
+        self._log_debug("GET", url)
+        response = self.session.get(url, headers=headers)
         self._raise_with_body(response, "GET", url)
         return response.json()
 
