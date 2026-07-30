@@ -151,10 +151,17 @@ def inspect(client, ticket_id, raw=False, json_path=None):
     for name, (value, path) in seen.items():
         print(f"{name[:39]:<40} {value[:29]:<30} {path}")
 
-    # Squelette config.json 'fields' (champs hors champs systeme evidents)
-    system = {"subject", "Change Request Description", "devices", "action",
-              "source", "destination", "service", "user", "application"}
-    skeleton = {name: value for name, (value, _) in seen.items() if name not in system}
+    # Squelette config.json 'fields' : on exclut les champs systeme / lecture-seule
+    # (renseignes par FireFlow) pour ne garder que les champs a remplir a la creation.
+    system = {
+        "subject", "change request description", "devices", "action",
+        "source", "destination", "service", "user", "application",
+        "creator", "requestor", "lastupdated", "form type", "workflow",
+        "status", "redirecturl", "initial plan status", "ticket template name",
+        "id", "changerequestid", "resolved", "owner", "createdate",
+    }
+    skeleton = {name: value for name, (value, _) in seen.items()
+                if name.lower() not in system}
     print(f"\n=== Squelette pour config.json (a ajuster) ===")
     print(json.dumps({"fields": skeleton}, indent=4, ensure_ascii=False))
 
