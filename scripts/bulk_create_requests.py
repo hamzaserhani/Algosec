@@ -75,15 +75,31 @@ def _canonize_row(raw_row):
 
 
 def read_csv_rows(path):
-    """Lit un CSV en ignorant d'eventuelles lignes vides en tete."""
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        # Saute les lignes totalement vides avant l'en-tete
-        lines = [ln for ln in f]
-    # Trouve la premiere ligne non vide = en-tete
-    start = 0
-    while start < len(lines) and not lines[start].strip():
-        start += 1
-    reader = csv.DictReader(lines[start:])
+    """Lit un CSV (encodage robuste) en ignorant les lignes vides en tete."""
+    import io
+
+    # Excel exporte souvent en Windows-1252 (cp1252), pas en UTF-8.
+    text = None
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            with open(path, "r", encoding=enc, newline="") as f:
+                text = f.read()
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise ValueError(f"Impossible de decoder {path} (encodage non reconnu)")
+
+    buf = io.StringIO(text)
+    # Saute les lignes totalement vides avant l'en-tete
+    pos = buf.tell()
+    line = buf.readline()
+    while line and not line.strip():
+        pos = buf.tell()
+        line = buf.readline()
+    buf.seek(pos)
+
+    reader = csv.DictReader(buf)
     return [dict(r) for r in reader]
 
 
@@ -154,6 +170,33 @@ def read_xlsx_rows(path):
     return data_rows
 
 
+def merge_continuation_rows(rows):
+    """Fusionne les lignes de continuation dans la demande precedente.
+
+    Dans le format reel, une demande peut s'etaler sur plusieurs lignes : la
+    1ere porte le '#' (et le Purpose), les suivantes ont '#'/Purpose vides mais
+    ajoutent des valeurs (IP, ports...) dans certaines colonnes. On accumule ces
+    valeurs (separees par un retour ligne) dans la demande courante.
+    """
+    merged = []
+    for row in rows:
+        if not any((v or "").strip() for v in row.values()):
+            continue  # ligne totalement vide
+        # Debut d'une nouvelle demande si '#' ou Purpose est renseigne
+        is_start = bool((row.get("id") or "").strip() or (row.get("purpose") or "").strip())
+        if is_start or not merged:
+            merged.append(dict(row))
+        else:
+            current = merged[-1]
+            for key, value in row.items():
+                value = (value or "").strip()
+                if not value:
+                    continue
+                prev = (current.get(key) or "").strip()
+                current[key] = f"{prev}\n{value}" if prev else value
+    return merged
+
+
 def load_requests(path):
     """Charge et canonise les lignes depuis un CSV ou XLSX."""
     ext = os.path.splitext(path)[1].lower()
@@ -163,7 +206,8 @@ def load_requests(path):
         raw_rows = read_csv_rows(path)
     else:
         raise ValueError(f"Extension non supportee: {ext} (attendu .csv ou .xlsx)")
-    return [_canonize_row(r) for r in raw_rows]
+    canon = [_canonize_row(r) for r in raw_rows]
+    return merge_continuation_rows(canon)
 
 
 # --- Mapping vers le payload ---------------------------------------------
