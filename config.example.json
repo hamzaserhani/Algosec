@@ -14,9 +14,9 @@
         "NPS - Firewall Rule Request - Add Firewall Rule - Permanent": "Yes",
         "CMS ticket id - CF": "REMPLIR"
     },
-    "_comment_traffic_fields": "Champs AU NIVEAU LIGNE DE TRAFIC (envoyes avec 'name').",
+    "_comment_traffic_fields": "Champs AU NIVEAU LIGNE DE TRAFIC (envoyes avec 'name'). Placeholders possibles dans les valeurs: {purpose}, {subject}, {description}.",
     "traffic_fields": {
-        "NPS - Firewall Rule Request - Add Firewall Rule - Justification per traffic line": "REMPLIR"
+        "NPS - Firewall Rule Request - Add Firewall Rule - Justification per traffic line": "{purpose}"
     },
     "reporting": {
         "templates": [

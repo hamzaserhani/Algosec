@@ -230,20 +230,32 @@ def build_services(port_cell, fw_app):
 
 
 def build_description(row):
-    """Compose une description lisible a partir des colonnes de contexte."""
-    parts = []
-    for label, key in (
-        ("Status", "status"),
-        ("Source app", "source_app"),
-        ("Application", "application"),
-        ("Target", "target_host"),
-        ("F/W", "fw_app"),
-        ("By when", "by_when"),
-    ):
-        val = row.get(key, "")
-        if val:
-            parts.append(f"{label}: {val}")
-    return " | ".join(parts)
+    """Description = Purpose + un contexte court (source -> cible, application)."""
+    purpose = (row.get("purpose") or "").strip()
+    src = (row.get("source_app") or "").strip()
+    tgt = (row.get("target_host") or "").strip()
+    app = (row.get("application") or "").strip()
+
+    context = []
+    if src or tgt:
+        context.append(f"{src or '?'} -> {tgt or '?'}")
+    if app:
+        context.append(app)
+
+    if purpose and context:
+        return f"{purpose} | " + " | ".join(context)
+    return purpose or " | ".join(context)
+
+
+def substitute_placeholders(value, ticket):
+    """Remplace {purpose}/{subject}/{description} dans une valeur de config."""
+    if not isinstance(value, str):
+        return value
+    return (
+        value.replace("{purpose}", ticket["subject"])
+        .replace("{subject}", ticket["subject"])
+        .replace("{description}", ticket["description"])
+    )
 
 
 def row_to_ticket(row):
@@ -376,11 +388,11 @@ def main():
             devices=ticket["devices"],
             template=args.template or client.default_template,
             custom_fields=[
-                {"name": name, "values": value}
+                {"name": name, "values": substitute_placeholders(value, ticket)}
                 for name, value in client.custom_fields.items()
             ],
             line_fields=[
-                {"name": name, "values": value}
+                {"name": name, "values": substitute_placeholders(value, ticket)}
                 for name, value in client.traffic_fields.items()
             ],
         )
