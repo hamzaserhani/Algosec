@@ -325,6 +325,64 @@ def record_history(history_dir, ticket, payload, result):
         json.dump(entry, f, indent=2, ensure_ascii=False)
 
 
+def lookup_ticket_id(history_dir, rid):
+    """Retourne l'ID du ticket cree pour ce '#' (depuis l'historique), ou ''."""
+    rid = (rid or "").strip()
+    if not rid:
+        return ""
+    key = re.sub(r"[^\w.-]", "_", rid)
+    path = os.path.join(history_dir, f"{key}.json")
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("ticket_id") or "")
+    except Exception:
+        return ""
+
+
+def write_tracking(input_path, history_dir):
+    """Ajoute/remplit une colonne 'ALGOSEC' avec l'ID du ticket cree par ligne.
+
+    Preserve la structure et toutes les colonnes du fichier source. Pour un
+    .xlsx (non reinscriptible ici), ecrit un CSV de suivi a cote.
+    """
+    ext = os.path.splitext(input_path)[1].lower()
+    if ext == ".xlsx":
+        raw = read_xlsx_rows(input_path)
+        out_path = os.path.splitext(input_path)[0] + "_tracking.csv"
+    else:
+        raw = read_csv_rows(input_path)
+        out_path = input_path
+
+    if not raw:
+        return
+
+    headers = list(raw[0].keys())
+    id_key = next((h for h in headers if _norm(h) == "#"), None)
+    if id_key is None:
+        print("[WARN] Colonne '#' introuvable : suivi ALGOSEC non ecrit.")
+        return
+
+    fieldnames = headers + (["ALGOSEC"] if "ALGOSEC" not in headers else [])
+    filled = 0
+    for row in raw:
+        tid = lookup_ticket_id(history_dir, row.get(id_key, ""))
+        if tid:
+            row["ALGOSEC"] = tid
+            filled += 1
+        else:
+            row.setdefault("ALGOSEC", row.get("ALGOSEC", ""))
+
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(raw)
+
+    print(f"[OK] Colonne ALGOSEC mise a jour dans {out_path} ({filled} ticket(s) renseigne(s)).")
+
+
 # --- Main -----------------------------------------------------------------
 
 def main():
@@ -338,6 +396,8 @@ def main():
     parser.add_argument("--history-dir", default="request_history", help="Dossier d'historique JSON")
     parser.add_argument("--force", action="store_true", help="Recree meme si deja dans l'historique")
     parser.add_argument("--template", help="Force le template FireFlow (sinon celui du CSV / defaut)")
+    parser.add_argument("--no-track", action="store_true",
+                        help="Ne pas ecrire l'ID du ticket dans la colonne ALGOSEC du fichier source")
 
     args = parser.parse_args()
 
@@ -418,6 +478,8 @@ def main():
             f"Resume: {success_count} reussi(s), {fail_count} echec(s), "
             f"{skipped_history} deja existant(s) sur {len(tickets)} demande(s)"
         )
+        if not args.no_track:
+            write_tracking(args.input_file, args.history_dir)
     else:
         print(f"\n[DRY-RUN] {len(tickets)} demande(s) affichee(s) (aucune envoyee)")
 
