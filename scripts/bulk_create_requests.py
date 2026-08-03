@@ -325,6 +325,23 @@ def record_history(history_dir, ticket, payload, result):
         json.dump(entry, f, indent=2, ensure_ascii=False)
 
 
+def _extract_error_message(exc):
+    """Extrait le(s) message(s) FireFlow d'une exception, sinon la 1ere ligne."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            body = resp.json()
+            msgs = body.get("messages") or []
+            if msgs:
+                return " ; ".join(
+                    f"{m.get('code', '')}: {m.get('message', '')}".strip(": ")
+                    for m in msgs
+                )
+        except Exception:
+            pass
+    return str(exc).splitlines()[0]
+
+
 def lookup_ticket_id(history_dir, rid):
     """Retourne l'ID du ticket cree pour ce '#' (depuis l'historique), ou ''."""
     rid = (rid or "").strip()
@@ -428,6 +445,7 @@ def main():
     success_count = 0
     fail_count = 0
     skipped_history = 0
+    failures = []  # (id, message) pour le recap final
 
     for i, ticket in enumerate(tickets, start=1):
         print(f"\n--- Demande {i}/{len(tickets)} (#{ticket.get('id') or '?'}) ---")
@@ -462,12 +480,23 @@ def main():
             print(json.dumps(payload, indent=2, ensure_ascii=False))
             continue
 
-        result = create_ticket(client, payload)
-        if result and result.get("status") == "Success":
-            success_count += 1
-            record_history(args.history_dir, ticket, payload, result)
-        else:
+        # Une demande fautive ne doit pas interrompre le lot : on capture,
+        # on compte l'echec, et on continue avec les demandes suivantes.
+        try:
+            result = create_ticket(client, payload)
+        except Exception as e:
+            msg = _extract_error_message(e)
+            print(f"  [ERREUR] Creation echouee: {msg}")
             fail_count += 1
+            failures.append((ticket.get("id") or "?", msg))
+            result = None
+        else:
+            if result and result.get("status") == "Success":
+                success_count += 1
+                record_history(args.history_dir, ticket, payload, result)
+            else:
+                fail_count += 1
+                failures.append((ticket.get("id") or "?", "reponse non-Success"))
 
         if i < len(tickets):
             time.sleep(args.delay)
@@ -478,6 +507,10 @@ def main():
             f"Resume: {success_count} reussi(s), {fail_count} echec(s), "
             f"{skipped_history} deja existant(s) sur {len(tickets)} demande(s)"
         )
+        if failures:
+            print(f"\nEchecs ({len(failures)}) - a corriger puis relancer :")
+            for rid, msg in failures:
+                print(f"  - #{rid}: {msg}")
         if not args.no_track:
             write_tracking(args.input_file, args.history_dir)
     else:
