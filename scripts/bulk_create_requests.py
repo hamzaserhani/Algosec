@@ -258,6 +258,16 @@ def substitute_placeholders(value, ticket):
     )
 
 
+def _dedupe(seq):
+    """Supprime les doublons en preservant l'ordre."""
+    seen, out = set(), []
+    for x in (seq or []):
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
 def row_to_ticket(row):
     """Transforme une ligne canonisee en dict de ticket, ou None si a ignorer."""
     subject = row.get("purpose", "").strip()
@@ -269,13 +279,14 @@ def row_to_ticket(row):
     if not sources or not destinations:
         return None, "Source IP ou Target IP manquante"
 
+    # Dedoublonnage (AlgoSec rejette une valeur repetee: DUPLICATED_VALUE_IN_LINE)
     ticket = {
         "id": row.get("id", "").strip(),
         "subject": subject,
         "description": build_description(row),
-        "sources": sources,
-        "destinations": destinations,
-        "services": build_services(row.get("port", ""), row.get("fw_app", "")),
+        "sources": _dedupe(sources),
+        "destinations": _dedupe(destinations),
+        "services": _dedupe(build_services(row.get("port", ""), row.get("fw_app", ""))),
         "action": "Allow",
         "devices": None,
         "template": "Basic Change Traffic Request",
