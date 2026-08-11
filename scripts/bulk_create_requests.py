@@ -313,8 +313,28 @@ def history_path(history_dir, ticket):
     return os.path.join(history_dir, f"{history_key(ticket)}.json")
 
 
-def already_created(history_dir, ticket):
-    return os.path.exists(history_path(history_dir, ticket))
+def load_history_entry(history_dir, ticket):
+    """Retourne l'entree d'historique de cette demande, ou None si absente."""
+    path = history_path(history_dir, ticket)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def history_content_matches(entry, ticket):
+    """True si l'historique correspond bien au contenu de la demande courante."""
+    if not entry:
+        return True
+    return (
+        entry.get("subject") == ticket["subject"]
+        and entry.get("sources") == ticket["sources"]
+        and entry.get("destinations") == ticket["destinations"]
+        and entry.get("services") == ticket["services"]
+    )
 
 
 def record_history(history_dir, ticket, payload, result):
@@ -445,6 +465,20 @@ def main():
 
     print(f"\n[INFO] {len(tickets)} demande(s) valide(s), {skipped} ignoree(s) depuis {args.input_file}")
 
+    # Detection des '#' en double : cause majeure de mismatch (une seule demande
+    # est creee, les autres du meme '#' sont sautees mais pointent vers ce ticket).
+    id_counts = {}
+    for t in tickets:
+        rid = (t.get("id") or "").strip()
+        if rid:
+            id_counts[rid] = id_counts.get(rid, 0) + 1
+    dups = {rid: n for rid, n in id_counts.items() if n > 1}
+    if dups:
+        print("\n[ALERTE] '#' en double detecte(s) - RISQUE DE MISMATCH :")
+        for rid, n in dups.items():
+            print(f"   - #{rid} apparait {n} fois -> une seule sera creee, les autres sautees.")
+        print("   Corrige les numeros (chaque demande doit avoir un # unique) avant de creer.")
+
     if not tickets:
         print("[INFO] Rien a faire.")
         return
@@ -461,9 +495,22 @@ def main():
     for i, ticket in enumerate(tickets, start=1):
         print(f"\n--- Demande {i}/{len(tickets)} (#{ticket.get('id') or '?'}) ---")
 
-        if not args.force and already_created(args.history_dir, ticket):
-            print(f"  [SKIP] Deja creee (historique: {history_path(args.history_dir, ticket)})")
-            skipped_history += 1
+        entry = load_history_entry(args.history_dir, ticket)
+        if entry is not None and not args.force:
+            if history_content_matches(entry, ticket):
+                print(f"  [SKIP] Deja creee (ticket {entry.get('ticket_id')}, historique intact)")
+                skipped_history += 1
+                continue
+            # L'historique existe mais avec un contenu DIFFERENT : le ticket
+            # deja cree ne correspond PAS a cette demande -> on alerte, on ne
+            # recree pas a l'aveugle (utiliser --force pour forcer).
+            print(f"  [ALERTE] #{ticket.get('id')}: l'historique (ticket "
+                  f"{entry.get('ticket_id')}) a un contenu DIFFERENT de cette demande.")
+            print(f"           historique: sources={entry.get('sources')} dest={entry.get('destinations')}")
+            print(f"           demande   : sources={ticket['sources']} dest={ticket['destinations']}")
+            print(f"           -> non recree. Verifie le ticket, ou relance avec --force.")
+            fail_count += 1
+            failures.append((ticket.get("id") or "?", f"contenu != ticket {entry.get('ticket_id')} (historique)"))
             continue
 
         payload = build_traffic_payload(
