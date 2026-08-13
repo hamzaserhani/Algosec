@@ -54,20 +54,41 @@ def split_values(cell):
     return [p.strip() for p in re.split(r"[|,;\n\r]+", cell or "") if p.strip()]
 
 
+RANGE_RE = re.compile(
+    r"^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+to\s+(\d{1,3}(?:\.\d{1,3}){3})\s*$", re.I
+)
+
+
 def clean_hosts(cell):
-    """Nettoie une cellule d'IP/hosts. Retourne (liste_propre, warnings)."""
+    """Nettoie une cellule d'IP/hosts SANS perdre de valeurs.
+
+    Gere : plusieurs IP separees par espace, plages 'A to B' -> 'A-B',
+    'hostname (1.2.3.4)' / 'hostname [1.2.3.4]' -> '1.2.3.4'.
+    """
     out, warns = [], []
     for part in split_values(cell):
-        m = IP_RE.search(part)
-        if m and m.group(0) != part:
-            # ex: 'ws.softnet.com.tr [195.87.97.37]' -> '195.87.97.37'
-            out.append(m.group(0))
-            warns.append(f"'{part}' -> '{m.group(0)}'")
-        elif m:
-            out.append(part)  # deja une IP / CIDR
+        part = part.strip()
+        if not part:
+            continue
+
+        # Plage explicite "A to B" -> "A-B"
+        mr = RANGE_RE.match(part)
+        if mr:
+            rng = f"{mr.group(1)}-{mr.group(2)}"
+            out.append(rng)
+            warns.append(f"plage '{part}' -> '{rng}'")
+            continue
+
+        ips = IP_RE.findall(part)
+        if not ips:
+            out.append(part)  # pas d'IP (hostname/URL) -> garde tel quel, signale
+            warns.append(f"valeur sans IP conservee telle quelle: '{part}'")
+        elif len(ips) == 1 and ips[0] == part:
+            out.append(part)  # deja une IP / CIDR propre
         else:
-            out.append(part)  # hostname sans IP -> garde tel quel, mais signale
-            warns.append(f"hostname sans IP conserve tel quel: '{part}'")
+            # une ou plusieurs IP noyees dans du texte / separees par espace
+            out.extend(ips)
+            warns.append(f"'{part}' -> {ips}")
     return out, warns
 
 
