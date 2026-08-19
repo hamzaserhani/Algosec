@@ -30,46 +30,47 @@ from bulk_create_requests import (
 
 
 # Cles portant une adresse/nom dans les items d'une ligne de trafic
-LEAF_KEYS = ("name", "address", "ipAddress", "ip", "value")
+# ('value' est utilise par la reponse GET FireFlow ; les autres par securite)
+LEAF_KEYS = ("value", "name", "address", "ipAddress", "ip")
 
 
-def _collect_leaf_names(node, out):
-    """Collecte recursivement les valeurs 'name/address/...' sous un noeud."""
-    if isinstance(node, dict):
+def _items_values(section):
+    """Extrait les valeurs des items d'une section source/destination/service.
+
+    Chaque item porte sa valeur sous 'value' (ou 'name'/'address' selon version).
+    """
+    out = []
+    for item in (section or {}).get("items", []):
+        if not isinstance(item, dict):
+            continue
         for k in LEAF_KEYS:
-            if k in node and isinstance(node[k], str) and node[k].strip():
-                out.append(node[k].strip())
-        for v in node.values():
-            _collect_leaf_names(v, out)
-    elif isinstance(node, list):
-        for item in node:
-            _collect_leaf_names(item, out)
+            if k in item and isinstance(item[k], str) and item[k].strip():
+                out.append(item[k].strip())
+                break
+    return out
 
 
 def extract_actual(result):
-    """Extrait {sources, destinations, services} reels depuis la reponse GET.
+    """Extrait {source, destination, service} REELS depuis la reponse GET.
 
-    Cherche recursivement les cles source/destination/service (dans
-    originalTraffic/plannedTraffic ou traffic) et collecte leurs valeurs.
+    Utilise 'originalTraffic' (ce qui a ete DEMANDE) en priorite ; a defaut
+    'traffic' puis 'plannedTraffic' (apres planification AlgoSec).
     """
+    data = result.get("data", result) or result
+    lines = (
+        data.get("originalTraffic")
+        or data.get("traffic")
+        or data.get("plannedTraffic")
+        or []
+    )
+
     found = {"source": [], "destination": [], "service": []}
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        for key in found:
+            found[key].extend(_items_values(line.get(key)))
 
-    def walk(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                kl = key.lower()
-                for target in found:
-                    # 'source', 'sources', 'trafficSource'... -> source
-                    if kl == target or kl == target + "s" or kl.endswith(target):
-                        names = []
-                        _collect_leaf_names(value, names)
-                        found[target].extend(names)
-                walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(result.get("data", result))
     # dedup en preservant l'ordre
     for k in found:
         seen, uniq = set(), []
