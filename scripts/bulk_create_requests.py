@@ -221,12 +221,22 @@ def parse_multi_value(value):
 
 
 def build_services(port_cell, fw_app):
-    """Construit la liste de services 'proto/port' a partir du port et du F/W App."""
+    """Construit la liste de services a partir du port et du F/W App.
+
+    - Port numerique (ou plage) -> 'tcp/<port>' (ou 'udp/' si F/W App le dit).
+    - Service deja nomme (ex: 'application-default') -> passe tel quel, sans prefixe.
+    """
     ports = parse_multi_value(port_cell)
     if not ports:
         return ["any"]
     proto = "udp" if fw_app and "udp" in fw_app.lower() else "tcp"
-    return [f"{proto}/{p}" for p in ports]
+    out = []
+    for p in ports:
+        if re.match(r"^\d+(?:-\d+)?$", p):
+            out.append(f"{proto}/{p}")
+        else:
+            out.append(p)  # service nomme (application-default, any, ...)
+    return out
 
 
 def build_description(row):

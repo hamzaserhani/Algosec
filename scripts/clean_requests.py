@@ -100,8 +100,11 @@ def clean_ports(cell):
         nums = re.findall(r"\d+(?:-\d+)?", stripped)
         if nums:
             out.extend(nums)
+        elif "default" in part.lower():
+            # 'default SSL' / 'application default' -> service Palo Alto
+            out.append("application-default")
         else:
-            unknown.append(part)  # ex: 'default SSL' -> a mapper a la main
+            unknown.append(part)  # non reconnu -> a mapper a la main
     return out, unknown
 
 
