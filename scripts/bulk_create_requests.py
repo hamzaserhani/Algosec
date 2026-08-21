@@ -456,8 +456,13 @@ def main():
     parser.add_argument("--template", help="Force le template FireFlow (sinon celui du CSV / defaut)")
     parser.add_argument("--no-track", action="store_true",
                         help="Ne pas ecrire l'ID du ticket dans la colonne ALGOSEC du fichier source")
+    parser.add_argument("--only", help="Ne traiter que ces '#' (liste separee par des virgules, ex: 243,245,270)")
 
     args = parser.parse_args()
+
+    only_ids = None
+    if args.only:
+        only_ids = {x.strip() for x in args.only.split(",") if x.strip()}
 
     rows = load_requests(args.input_file)
 
@@ -471,6 +476,8 @@ def main():
                     print(f"[WARN] Ligne {i}: {reason}, ignoree.")
                     skipped += 1
             continue
+        if only_ids is not None and (ticket.get("id") or "").strip() not in only_ids:
+            continue  # filtre --only
         tickets.append(ticket)
 
     print(f"\n[INFO] {len(tickets)} demande(s) valide(s), {skipped} ignoree(s) depuis {args.input_file}")
@@ -500,6 +507,7 @@ def main():
     success_count = 0
     fail_count = 0
     skipped_history = 0
+    to_create = 0  # nombre reellement a creer (non sautes)
     failures = []  # (id, message) pour le recap final
 
     for i, ticket in enumerate(tickets, start=1):
@@ -543,8 +551,9 @@ def main():
             ],
         )
 
+        to_create += 1
         if args.dry_run:
-            print(f"  [DRY-RUN] {ticket['subject']}")
+            print(f"  [DRY-RUN] A CREER #{ticket.get('id') or '?'}: {ticket['subject']}")
             print(json.dumps(payload, indent=2, ensure_ascii=False))
             continue
 
@@ -582,7 +591,16 @@ def main():
         if not args.no_track:
             write_tracking(args.input_file, args.history_dir)
     else:
-        print(f"\n[DRY-RUN] {len(tickets)} demande(s) affichee(s) (aucune envoyee)")
+        print(f"\n{'='*40}")
+        print(
+            f"[DRY-RUN] {to_create} A CREER, {skipped_history} deja existante(s) "
+            f"(sautee(s)), {fail_count} en alerte, sur {len(tickets)} demande(s) valide(s). "
+            f"Aucune envoyee."
+        )
+        if failures:
+            print(f"\nEn alerte ({len(failures)}) - a verifier :")
+            for rid, msg in failures:
+                print(f"  - #{rid}: {msg}")
 
 
 if __name__ == "__main__":
