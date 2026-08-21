@@ -101,8 +101,11 @@ def clean_ports(cell):
         if nums:
             out.extend(nums)
         elif "default" in part.lower():
-            # 'default SSL' / 'application default' -> service Palo Alto
-            out.append("application-default")
+            # 'default SSL' / 'application default' : l'API refuse le service
+            # 'application-default' dans ce flux (exige une application + doit
+            # etre seul). On ne produit rien -> le service tombe sur 'any'
+            # (ou sur les ports numeriques presents dans la meme cellule).
+            unknown.append(part)
         else:
             unknown.append(part)  # non reconnu -> a mapper a la main
     return out, unknown

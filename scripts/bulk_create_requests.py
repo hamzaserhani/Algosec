@@ -232,11 +232,13 @@ def build_services(port_cell, fw_app):
     proto = "udp" if fw_app and "udp" in fw_app.lower() else "tcp"
     out = []
     for p in ports:
+        if p.lower() == "application-default":
+            continue  # refuse par l'API dans ce flux -> ignore (fallback 'any')
         if re.match(r"^\d+(?:-\d+)?$", p):
             out.append(f"{proto}/{p}")
         else:
-            out.append(p)  # service nomme (application-default, any, ...)
-    return out
+            out.append(p)  # service nomme (any, ...)
+    return out or ["any"]
 
 
 def build_description(row):
