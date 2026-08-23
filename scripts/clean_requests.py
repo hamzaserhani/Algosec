@@ -71,6 +71,13 @@ def clean_hosts(cell):
         if not part:
             continue
 
+        # Prefixe wildcard URL -> FQDN accepte par AlgoSec
+        # '*.sap.com' -> 'sap.com' ; '*ariba.com' -> 'ariba.com'
+        stripped = re.sub(r"^\*\.?", "", part)
+        if stripped != part:
+            warns.append(f"wildcard '{part}' -> '{stripped}'")
+            part = stripped
+
         # Plage explicite "A to B" -> "A-B"
         mr = RANGE_RE.match(part)
         if mr:
