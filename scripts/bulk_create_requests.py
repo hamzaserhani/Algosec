@@ -56,6 +56,7 @@ HEADER_MAP = {
     "target ip": "target_ip",
     "tcp-ip range": "port",
     "f/w application": "fw_app",
+    "user": "user",
 }
 
 
@@ -302,8 +303,34 @@ def row_to_ticket(row):
         "action": "Allow",
         "devices": None,
         "template": "Basic Change Traffic Request",
+        # User de la ligne de trafic (colonne 'User' optionnelle). None -> defaut config.
+        "user": (row.get("user") or "").strip() or None,
     }
     return ticket, None
+
+
+def apply_source_object_map(ticket, mapping):
+    """Route un objet source nomme (ex: SX41-GBL-USR-APP) vers le champ user.
+
+    mapping (depuis config.json 'source_object_map'):
+        { "SX41-GBL-USR-APP": {"sources": ["10.0.0.0/8","172.16.0.0/12"],
+                               "user": "SX41-GBL-USR-APP"} }
+    Si une source de la demande correspond a une cle, on remplace les sources
+    par les subnets indiques et on place la valeur dans le champ user.
+    """
+    if not mapping:
+        return ticket
+    new_sources = []
+    for src in ticket["sources"]:
+        rule = mapping.get(src)
+        if rule:
+            new_sources.extend(rule.get("sources", []))
+            if rule.get("user"):
+                ticket["user"] = rule["user"]
+        else:
+            new_sources.append(src)
+    ticket["sources"] = _dedupe(new_sources)
+    return ticket
 
 
 # --- Historique -----------------------------------------------------------
@@ -515,6 +542,9 @@ def main():
     for i, ticket in enumerate(tickets, start=1):
         print(f"\n--- Demande {i}/{len(tickets)} (#{ticket.get('id') or '?'}) ---")
 
+        # Route les objets source nommes (ex: SX41-GBL-USR-APP) vers le champ user
+        apply_source_object_map(ticket, client.source_object_map)
+
         entry = load_history_entry(args.history_dir, ticket)
         if entry is not None and not args.force:
             if history_content_matches(entry, ticket):
@@ -539,7 +569,7 @@ def main():
             sources=ticket["sources"],
             destinations=ticket["destinations"],
             services=ticket["services"],
-            users=[client.default_user],
+            users=[ticket["user"]] if ticket.get("user") else [client.default_user],
             action=ticket["action"],
             devices=ticket["devices"],
             template=args.template or client.default_template,

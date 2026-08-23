@@ -18,6 +18,13 @@
     "traffic_fields": {
         "NPS - Firewall Rule Request - Add Firewall Rule - Justification per traffic line": "{purpose}"
     },
+    "_comment_source_object_map": "Objet source nomme -> remplace la source par des subnets et met la valeur dans le champ User.",
+    "source_object_map": {
+        "SX41-GBL-USR-APP": {
+            "sources": ["10.0.0.0/8", "172.16.0.0/12"],
+            "user": "SX41-GBL-USR-APP"
+        }
+    },
     "reporting": {
         "templates": [
             "Mon Template Custom 1",

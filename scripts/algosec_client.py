@@ -44,6 +44,10 @@ class AlgosecClient:
         # traffic line). Envoyes avec la cle "name".
         # Format config.json: {"traffic_fields": {"NPS - ... - Justification ...": "..."}}
         self.traffic_fields = config.get("traffic_fields") or {}
+        # Objets source nommes a router vers le champ user (ex: SX41-GBL-USR-APP).
+        # Format: {"SX41-GBL-USR-APP": {"sources": ["10.0.0.0/8","172.16.0.0/12"],
+        #                               "user": "SX41-GBL-USR-APP"}}
+        self.source_object_map = config.get("source_object_map") or {}
         self.session_id = None
 
         # Session persistante : le cookie jar gere automatiquement le scope
