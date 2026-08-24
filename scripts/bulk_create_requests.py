@@ -486,6 +486,8 @@ def main():
     parser.add_argument("--no-track", action="store_true",
                         help="Ne pas ecrire l'ID du ticket dans la colonne ALGOSEC du fichier source")
     parser.add_argument("--only", help="Ne traiter que ces '#' (liste separee par des virgules, ex: 243,245,270)")
+    parser.add_argument("--split-destinations", action="store_true",
+                        help="Une ligne de trafic par destination (evite le mix FQDN/IP refuse par AlgoSec)")
 
     args = parser.parse_args()
 
@@ -581,6 +583,7 @@ def main():
                 {"name": name, "values": substitute_placeholders(value, ticket)}
                 for name, value in client.traffic_fields.items()
             ],
+            split_destinations=args.split_destinations,
         )
 
         to_create += 1

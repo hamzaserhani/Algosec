@@ -26,6 +26,7 @@ def build_traffic_payload(
     application="any",
     custom_fields=None,
     line_fields=None,
+    split_destinations=False,
     nat_source=None,
     nat_destination=None,
     nat_port=None,
@@ -54,26 +55,6 @@ def build_traffic_payload(
         if name and values:
             fields.append({"key": name, "values": [str(v) for v in values]})
 
-    # Lignes de trafic
-    traffic_line = {
-        "source": {
-            "items": [{"name": s} for s in (sources or [])]
-        },
-        "destination": {
-            "items": [{"name": d} for d in (destinations or [])]
-        },
-        "service": {
-            "items": [{"name": svc} for svc in (services or ["any"])]
-        },
-        "user": {
-            "items": [{"name": u} for u in (users or ["any"])]
-        },
-        "application": {
-            "items": [{"name": application}]
-        },
-        "action": action,
-    }
-
     # Champs personnalises au niveau de la ligne de trafic
     # (ex: "Justification per traffic line"). IMPORTANT: ici FireFlow attend "name".
     line_field_items = []
@@ -84,25 +65,41 @@ def build_traffic_payload(
             values = [str(values)]
         if name and values:
             line_field_items.append({"name": name, "values": [str(v) for v in values]})
-    if line_field_items:
-        traffic_line["fields"] = line_field_items
 
-    # NAT (optionnel)
-    if nat_source or nat_destination or nat_port:
-        traffic_line["natDetails"] = {
-            "type": nat_type,
+    def _make_line(dests):
+        line = {
+            "source": {"items": [{"name": s} for s in (sources or [])]},
+            "destination": {"items": [{"name": d} for d in dests]},
+            "service": {"items": [{"name": svc} for svc in (services or ["any"])]},
+            "user": {"items": [{"name": u} for u in (users or ["any"])]},
+            "application": {"items": [{"name": application}]},
+            "action": action,
         }
-        if nat_source:
-            traffic_line["natDetails"]["source"] = nat_source if isinstance(nat_source, list) else [nat_source]
-        if nat_destination:
-            traffic_line["natDetails"]["destination"] = nat_destination if isinstance(nat_destination, list) else [nat_destination]
-        if nat_port:
-            traffic_line["natDetails"]["port"] = nat_port if isinstance(nat_port, list) else [nat_port]
+        if line_field_items:
+            line["fields"] = [dict(f) for f in line_field_items]
+        # NAT (optionnel) - applique sur chaque ligne
+        if nat_source or nat_destination or nat_port:
+            line["natDetails"] = {"type": nat_type}
+            if nat_source:
+                line["natDetails"]["source"] = nat_source if isinstance(nat_source, list) else [nat_source]
+            if nat_destination:
+                line["natDetails"]["destination"] = nat_destination if isinstance(nat_destination, list) else [nat_destination]
+            if nat_port:
+                line["natDetails"]["port"] = nat_port if isinstance(nat_port, list) else [nat_port]
+        return line
+
+    dest_list = destinations or []
+    if split_destinations and len(dest_list) > 1:
+        # Une ligne de trafic par destination (evite le mix FQDN/autres types
+        # refuse par AlgoSec: INVALID_MIX_OF_SPECIAL_AND_OTHER_VALUE_TYPES).
+        traffic = [_make_line([d]) for d in dest_list]
+    else:
+        traffic = [_make_line(dest_list)]
 
     payload = {
         "template": template,
         "fields": fields,
-        "traffic": [traffic_line],
+        "traffic": traffic,
     }
 
     return payload
