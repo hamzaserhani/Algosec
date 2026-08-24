@@ -1,0 +1,145 @@
+"""
+Client Panorama (PAN-OS XML API) - test security-policy-match.
+
+Sert a savoir si un flux est reellement autorise sur un firewall Palo Alto
+(verdict live, App-ID aware), via une commande operationnelle redirigee par
+Panorama vers un firewall cible (target=<serial>).
+
+API PAN-OS :
+    - Keygen : GET  /api/?type=keygen&user=<u>&password=<p>  -> <key>...</key>
+    - Op cmd : GET  /api/?type=op&cmd=<...>&target=<serial>&key=<key>
+    - Devices: <show><devices><connected></connected></devices></show>
+    - Match  : <test><security-policy-match>
+                 <source>IP</source><destination>IP</destination>
+                 <destination-port>N</destination-port><protocol>6|17</protocol>
+                 [<application>app</application>]
+               </security-policy-match></test>
+      -> destination-port et protocol : ENTIERS UNIQUES (pas de 'any'/plage).
+
+Config (config.json) :
+    "panorama": {
+        "server": "https://panorama.example.com",
+        "api_key": "...",              // ou username/password
+        "username": "...", "password": "...",
+        "verify_ssl": false
+    }
+"""
+
+import json
+import os
+import re
+from urllib.parse import quote
+
+import requests
+import urllib3
+
+PROTO_NUM = {"tcp": "6", "udp": "17", "icmp": "1"}
+
+
+class PanoramaClient:
+    def __init__(self, config_path="config.json"):
+        with open(config_path, "r") as f:
+            cfg = json.load(f).get("panorama") or {}
+        if not cfg.get("server"):
+            raise Exception("Config 'panorama.server' manquante dans config.json")
+
+        self.server = cfg["server"].rstrip("/")
+        self.api_key = cfg.get("api_key")
+        self.username = cfg.get("username")
+        self.password = cfg.get("password")
+        self.verify_ssl = cfg.get("verify_ssl", True)
+        self.session = requests.Session()
+        self.session.verify = self.verify_ssl
+        self.debug = os.environ.get("ALGOSEC_DEBUG", "").lower() in ("1", "true", "yes")
+        if not self.verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def keygen(self):
+        """Genere une cle API a partir de username/password (si pas d'api_key)."""
+        if self.api_key:
+            return self.api_key
+        if not (self.username and self.password):
+            raise Exception("Panorama: fournir 'api_key' OU 'username'+'password' dans config.json")
+        url = (f"{self.server}/api/?type=keygen&user={quote(str(self.username))}"
+               f"&password={quote(str(self.password))}")
+        resp = self.session.get(url)
+        resp.raise_for_status()
+        m = re.search(r"<key>(.*?)</key>", resp.text, re.S)
+        if not m:
+            raise Exception(f"Keygen Panorama echoue: {resp.text[:300]}")
+        self.api_key = m.group(1).strip()
+        print("[OK] Cle API Panorama obtenue.")
+        return self.api_key
+
+    def _op(self, cmd_xml, target=None):
+        """Execute une commande operationnelle. Retourne le texte XML brut."""
+        if not self.api_key:
+            self.keygen()
+        params = {"type": "op", "cmd": cmd_xml, "key": self.api_key}
+        if target:
+            params["target"] = target
+        if self.debug:
+            print(f"[DEBUG] Panorama op target={target} cmd={cmd_xml[:200]}")
+        resp = self.session.get(f"{self.server}/api/", params=params)
+        resp.raise_for_status()
+        return resp.text
+
+    def list_devices(self):
+        """Liste les firewalls connectes : [{serial, hostname}]."""
+        xml = self._op("<show><devices><connected></connected></devices></show>")
+        devices = []
+        for entry in re.findall(r"<entry[^>]*>(.*?)</entry>", xml, re.S):
+            serial = re.search(r"<serial>(.*?)</serial>", entry, re.S)
+            host = re.search(r"<hostname>(.*?)</hostname>", entry, re.S)
+            if serial:
+                devices.append({
+                    "serial": serial.group(1).strip(),
+                    "hostname": host.group(1).strip() if host else "",
+                })
+        return devices
+
+    def test_policy_match(self, serial, source, destination, dport, protocol,
+                          application=None, from_zone=None, to_zone=None):
+        """test security-policy-match sur un firewall cible. Retourne (rule, action, raw).
+
+        dport : entier ; protocol : 'tcp'/'udp' ou numero. Pas de plage/any.
+        """
+        proto = PROTO_NUM.get(str(protocol).lower(), str(protocol))
+        parts = [
+            f"<source>{source}</source>",
+            f"<destination>{destination}</destination>",
+            f"<destination-port>{dport}</destination-port>",
+            f"<protocol>{proto}</protocol>",
+        ]
+        if application:
+            parts.append(f"<application>{application}</application>")
+        if from_zone:
+            parts.append(f"<from>{from_zone}</from>")
+        if to_zone:
+            parts.append(f"<to>{to_zone}</to>")
+        cmd = f"<test><security-policy-match>{''.join(parts)}</security-policy-match></test>"
+
+        raw = self._op(cmd, target=serial)
+        # Parsing best-effort : nom de regle + action
+        rule = re.search(r'<rules?>.*?<entry name="(.*?)"', raw, re.S) or \
+               re.search(r"<name>(.*?)</name>", raw, re.S)
+        action = re.search(r"<action>(.*?)</action>", raw, re.S)
+        rule_name = rule.group(1).strip() if rule else None
+        action_val = action.group(1).strip() if action else None
+        return rule_name, action_val, raw
+
+
+if __name__ == "__main__":
+    import sys
+    c = PanoramaClient(sys.argv[1] if len(sys.argv) > 1 else "config.json")
+    c.keygen()
+    if len(sys.argv) >= 2 and sys.argv[-1] == "--devices":
+        for d in c.list_devices():
+            print(f"  {d['serial']}  {d['hostname']}")
+    # Test : python panorama_client.py config.json <serial> <src> <dst> <dport> <tcp|udp> [app]
+    elif len(sys.argv) >= 7:
+        serial, src, dst, dport, proto = sys.argv[2:7]
+        app = sys.argv[7] if len(sys.argv) > 7 else None
+        rule, action, raw = c.test_policy_match(serial, src, dst, dport, proto, app)
+        print(f"rule={rule}  action={action}")
+        print(raw)
