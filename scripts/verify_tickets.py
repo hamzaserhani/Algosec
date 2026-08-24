@@ -24,6 +24,7 @@ from inspect_ticket_fields import fetch_ticket
 from bulk_create_requests import (
     load_requests,
     row_to_ticket,
+    apply_source_object_map,
     lookup_ticket_id,
     _norm,
 )
@@ -102,6 +103,9 @@ def verify_one(client, req, ticket_id):
     if expected is None:
         return {"id": req.get("id"), "ticket_id": ticket_id,
                 "status": "SKIPPED", "reason": reason}
+    # Applique le meme mapping objet-source qu'a la creation (ex: SX41-GBL-USR-APP
+    # -> GLOBAL-UCB-USERS), sinon faux mismatch sur la source.
+    apply_source_object_map(expected, getattr(client, "source_object_map", {}))
     form_type, result, _ = fetch_ticket(client, ticket_id)
     if result is None:
         return {"id": req.get("id"), "ticket_id": ticket_id, "status": "UNREADABLE"}
