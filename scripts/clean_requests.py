@@ -54,6 +54,15 @@ def split_values(cell):
     return [p.strip() for p in re.split(r"[|,;\n\r]+", cell or "") if p.strip()]
 
 
+def clean_text(value):
+    """Nettoie un champ texte : retire le caractere de remplacement U+FFFD (�)
+    et les caracteres de controle, compresse les espaces."""
+    value = (value or "").replace("\n", " ")
+    value = value.replace("�", "")          # � (encodage casse)
+    value = re.sub(r"[\x00-\x1f\x7f]", "", value)  # caracteres de controle
+    return re.sub(r"\s+", " ", value).strip()
+
+
 RANGE_RE = re.compile(
     r"^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+to\s+(\d{1,3}(?:\.\d{1,3}){3})\s*$", re.I
 )
@@ -147,7 +156,7 @@ def main():
         dst, w_dst = clean_hosts(req.get("target_ip", ""))
         ports, unknown = clean_ports(req.get("port", ""))
 
-        row = {name: (req.get(key) or "").replace("\n", " ").strip() for name, key in OUT_COLUMNS}
+        row = {name: clean_text(req.get(key)) for name, key in OUT_COLUMNS}
         row["Source IP"] = "|".join(src)
         row["Target IP"] = "|".join(dst)
         row["TCP-IP range"] = "|".join(ports)
