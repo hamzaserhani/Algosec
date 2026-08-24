@@ -57,6 +57,7 @@ HEADER_MAP = {
     "tcp-ip range": "port",
     "f/w application": "fw_app",
     "user": "user",
+    "deja_autorise": "deja_autorise",
 }
 
 
@@ -305,6 +306,8 @@ def row_to_ticket(row):
         "template": "Basic Change Traffic Request",
         # User de la ligne de trafic (colonne 'User' optionnelle). None -> defaut config.
         "user": (row.get("user") or "").strip() or None,
+        # Verdict pre-check flux (colonne 'deja_autorise', si presente).
+        "deja_autorise": (row.get("deja_autorise") or "").strip().upper(),
     }
     return ticket, None
 
@@ -486,6 +489,8 @@ def main():
     parser.add_argument("--no-track", action="store_true",
                         help="Ne pas ecrire l'ID du ticket dans la colonne ALGOSEC du fichier source")
     parser.add_argument("--only", help="Ne traiter que ces '#' (liste separee par des virgules, ex: 243,245,270)")
+    parser.add_argument("--skip-allowed", action="store_true",
+                        help="Sauter les demandes dont la colonne 'deja_autorise' vaut ALLOWED (pre-check flux)")
     parser.add_argument("--split-destinations", action="store_true",
                         help="Une ligne de trafic par destination (evite le mix FQDN/IP refuse par AlgoSec)")
 
@@ -540,9 +545,16 @@ def main():
     skipped_history = 0
     to_create = 0  # nombre reellement a creer (non sautes)
     failures = []  # (id, message) pour le recap final
+    skipped_allowed = 0
 
     for i, ticket in enumerate(tickets, start=1):
         print(f"\n--- Demande {i}/{len(tickets)} (#{ticket.get('id') or '?'}) ---")
+
+        # Pre-check flux : si deja autorise (verdict logs), on ne cree pas le ticket.
+        if args.skip_allowed and ticket.get("deja_autorise") == "ALLOWED":
+            print(f"  [SKIP] Flux deja autorise (pre-check logs) -> pas de ticket.")
+            skipped_allowed += 1
+            continue
 
         # Route les objets source nommes (ex: SX41-GBL-USR-APP) vers le champ user
         apply_source_object_map(ticket, client.source_object_map)
@@ -617,7 +629,8 @@ def main():
         print(f"\n{'='*40}")
         print(
             f"Resume: {success_count} reussi(s), {fail_count} echec(s), "
-            f"{skipped_history} deja existant(s) sur {len(tickets)} demande(s)"
+            f"{skipped_history} deja existant(s), {skipped_allowed} deja autorise(s) "
+            f"sur {len(tickets)} demande(s)"
         )
         if failures:
             print(f"\nEchecs ({len(failures)}) - a corriger puis relancer :")
@@ -628,9 +641,9 @@ def main():
     else:
         print(f"\n{'='*40}")
         print(
-            f"[DRY-RUN] {to_create} A CREER, {skipped_history} deja existante(s) "
-            f"(sautee(s)), {fail_count} en alerte, sur {len(tickets)} demande(s) valide(s). "
-            f"Aucune envoyee."
+            f"[DRY-RUN] {to_create} A CREER, {skipped_history} deja existante(s), "
+            f"{skipped_allowed} deja autorise(s), {fail_count} en alerte, "
+            f"sur {len(tickets)} demande(s) valide(s). Aucune envoyee."
         )
         if failures:
             print(f"\nEn alerte ({len(failures)}) - a verifier :")

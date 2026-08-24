@@ -27,15 +27,35 @@ Usage:
 
 import argparse
 import datetime
+import ipaddress
 import json
 
 from panorama_client import PanoramaClient
 from check_flows_panorama import expand_services
+from check_flows import write_column
 from bulk_create_requests import (
     load_requests,
     row_to_ticket,
     apply_source_object_map,
 )
+
+
+def is_ip_like(value):
+    """True si la valeur est une IP, un subnet, ou une plage 'a-b' d'IP."""
+    v = (value or "").strip()
+    try:
+        if "-" in v and "/" not in v:
+            a, b = v.split("-", 1)
+            ipaddress.ip_address(a.strip())
+            ipaddress.ip_address(b.strip())
+            return True
+        if "/" in v:
+            ipaddress.ip_network(v, strict=False)
+            return True
+        ipaddress.ip_address(v)
+        return True
+    except ValueError:
+        return False
 
 
 def build_log_query(sources, destinations, ports, action, since_str):
@@ -70,6 +90,14 @@ def check_via_logs(pano, ticket, since_str):
     destinations = ticket["destinations"]
     ports = flow_ports(ticket["services"])
 
+    # Les logs se filtrent sur des IP/subnets. Si une source/dest est un objet
+    # nomme (ex: GLOBAL-UCB-USERS) ou un hostname, on ne peut pas filtrer
+    # fiablement -> pas de skip a l'aveugle.
+    non_ip = [v for v in sources + destinations if not is_ip_like(v)]
+    if non_ip:
+        return "NON_IP", {"non_ip": non_ip,
+                          "note": "source/dest non-IP : verifier manuellement"}
+
     q_allow = build_log_query(sources, destinations, ports, "allow", since_str)
     allow_logs = pano.query_traffic_log(q_allow, nlogs=5)
 
@@ -96,6 +124,7 @@ def main():
     parser.add_argument("--days", type=int, default=30, help="Fenetre logs en jours (defaut 30)")
     parser.add_argument("--json", dest="json_path", help="Sauve le rapport en JSON")
     parser.add_argument("--raw", action="store_true", help="Affiche les echantillons de logs")
+    parser.add_argument("--no-write", action="store_true", help="Ne pas ecrire la colonne deja_autorise")
 
     args = parser.parse_args()
     only_ids = {x.strip() for x in args.only.split(",")} if args.only else None
@@ -125,7 +154,7 @@ def main():
     pano = PanoramaClient(args.config)
     pano.keygen()
 
-    reports, counts = [], {}
+    reports, counts, results_by_id = [], {}, {}
     for t in flows:
         rid = t.get("id") or "?"
         print(f"\n=== Flux #{rid} : {t['sources']} -> {t['destinations']} svc={t['services']} ===")
@@ -140,6 +169,7 @@ def main():
             for e in detail["allow_sample"]:
                 print(f"     allow: {e.get('src')}->{e.get('dst')}:{e.get('dport')} rule={e.get('rule')} app={e.get('app')} @{e.get('time')}")
         counts[status] = counts.get(status, 0) + 1
+        results_by_id[str(rid)] = status
         reports.append({"id": rid, "status": status, "detail": detail,
                         "sources": t["sources"], "destinations": t["destinations"],
                         "services": t["services"]})
@@ -148,7 +178,10 @@ def main():
     print("Resume:", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     allowed = counts.get("ALLOWED", 0)
     print(f"-> {allowed} flux DEJA AUTORISE(S) (ticket evitable). "
-          f"NO_TRAFFIC -> a confirmer par simulation/manuel.")
+          f"NO_TRAFFIC/NON_IP -> creer le ticket (defaut sur).")
+
+    if not args.no_write:
+        write_column(args.input_file, results_by_id)
 
     if args.json_path:
         with open(args.json_path, "w", encoding="utf-8") as f:
