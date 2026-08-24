@@ -31,66 +31,49 @@ from bulk_create_requests import (
     _norm,
 )
 
-# Valeurs de statut connues renvoyees par AFA (normalisees)
-STATUS_ALIASES = {
-    "allowed": "ALLOWED",
-    "blocked": "BLOCKED",
-    "partially allowed": "PARTIAL",
-    "partially blocked": "PARTIAL",
-    "not routed": "NOT_ROUTED",
-    "unreachable": "NOT_ROUTED",
-}
-
-# Cles de la reponse susceptibles de porter le verdict
-VERDICT_KEYS = ("queryresult", "result", "action", "isallowed", "trafficallowed")
-
-
-def _collect_verdicts(node, found):
-    """Collecte recursivement les valeurs de statut trouvees dans la reponse."""
-    if isinstance(node, dict):
-        for k, v in node.items():
-            if _norm(k).replace(" ", "") in VERDICT_KEYS and isinstance(v, str):
-                found.append(v.strip().lower())
-            _collect_verdicts(v, found)
-    elif isinstance(node, list):
-        for item in node:
-            _collect_verdicts(item, found)
+def _map_final(final):
+    """Mappe la valeur 'finalResult' d'AFA vers un statut canonique."""
+    f = (final or "").lower()
+    if "partial" in f:
+        return "PARTIAL"
+    if "allowed" in f:
+        return "ALLOWED"
+    if "blocked" in f:
+        return "BLOCKED"
+    return "UNKNOWN"
 
 
 def classify_result(result):
-    """Classe la reponse AFA. Retourne (statut, verdicts_bruts)."""
-    found = []
-    _collect_verdicts(result.get("data", result) if isinstance(result, dict) else result, found)
+    """Classe la reponse AFA sur 'finalResult' (+ 'fipResult' pour le routing).
 
-    # Normalise chaque verdict. IMPORTANT: tester les alias les plus longs
-    # d'abord ('partially allowed' avant 'allowed', sinon faux ALLOWED).
-    norm = set()
-    aliases_by_len = sorted(STATUS_ALIASES.items(), key=lambda kv: -len(kv[0]))
-    for v in found:
-        for alias, canon in aliases_by_len:
-            if alias in v:
-                norm.add(canon)
-                break
-        else:
-            if v == "true":
-                norm.add("ALLOWED")
-            elif v == "false":
-                norm.add("BLOCKED")
+    Retourne (statut, verdicts_bruts). Conservateur : ALLOWED seulement si TOUTES
+    les entrees sont 'Allowed'.
+    """
+    entries = (result or {}).get("queryResult") or []
+    finals, fips = [], []
+    for e in entries:
+        if isinstance(e, dict):
+            if e.get("finalResult"):
+                finals.append(str(e["finalResult"]))
+            if e.get("fipResult"):
+                fips.append(str(e["fipResult"]))
 
-    if not norm:
-        return "UNKNOWN", found
-    # Conservateur : ALLOWED seulement si TOUT est allowed (aucun autre etat)
-    if norm == {"ALLOWED"}:
-        return "ALLOWED", found
-    if "BLOCKED" in norm and "ALLOWED" in norm:
-        return "PARTIAL", found
-    if "PARTIAL" in norm:
-        return "PARTIAL", found
-    if "BLOCKED" in norm:
-        return "BLOCKED", found
-    if "NOT_ROUTED" in norm:
-        return "NOT_ROUTED", found
-    return "UNKNOWN", found
+    statuses = {_map_final(f) for f in finals}
+
+    if not statuses:
+        # Pas de verdict : regarde le routing (pas de chemin -> NOT_ROUTED)
+        for fp in fips:
+            if any(x in fp.lower() for x in ("unreachable", "notrouted", "not routed")):
+                return "NOT_ROUTED", finals + fips
+        return "UNKNOWN", finals + fips
+
+    if statuses == {"ALLOWED"}:
+        return "ALLOWED", finals
+    if "PARTIAL" in statuses or ("ALLOWED" in statuses and "BLOCKED" in statuses):
+        return "PARTIAL", finals
+    if "BLOCKED" in statuses:
+        return "BLOCKED", finals
+    return "UNKNOWN", finals
 
 
 def afa_service(svc):
@@ -143,6 +126,10 @@ def main():
 
     only_ids = {x.strip() for x in args.only.split(",")} if args.only else None
 
+    # Meme mapping objet-source qu'a la creation (ex: SX41-GBL-USR-APP -> GLOBAL-UCB-USERS)
+    with open(args.config, "r") as f:
+        source_object_map = json.load(f).get("source_object_map") or {}
+
     rows = load_requests(args.input_file)
     flows = []
     for row in rows:
@@ -151,7 +138,7 @@ def main():
             continue
         if only_ids is not None and (ticket.get("id") or "").strip() not in only_ids:
             continue
-        apply_source_object_map(ticket, {})  # sources telles quelles (map applique a la creation)
+        apply_source_object_map(ticket, source_object_map)
         flows.append(ticket)
 
     if not flows:
