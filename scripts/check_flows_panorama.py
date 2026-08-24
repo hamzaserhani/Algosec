@@ -22,6 +22,7 @@ Usage (validation d'un flux connu) :
 """
 
 import argparse
+import ipaddress
 import json
 import re
 
@@ -31,6 +32,32 @@ from bulk_create_requests import (
     row_to_ticket,
     apply_source_object_map,
 )
+
+
+def to_host(value):
+    """Convertit une valeur source/dest en IP unique testable par PAN-OS.
+
+    PAN-OS test-policy-match exige /32 ou sans masque. Retourne (ip, note).
+      - IP simple / /32          -> telle quelle
+      - subnet 10.1.156.0/24     -> 1er hote (10.1.156.1) + note 'representatif'
+      - plage 'a-b'              -> 1re IP + note
+      - hostname/objet nomme     -> None + note (non testable ici)
+    """
+    v = (value or "").strip()
+    # Plage "a-b" -> 1re IP
+    if "-" in v and "/" not in v:
+        v = v.split("-", 1)[0].strip()
+    try:
+        if "/" in v:
+            net = ipaddress.ip_network(v, strict=False)
+            if net.prefixlen == 32:
+                return str(net.network_address), None
+            host = net.network_address + 1  # 1er hote utilisable
+            return str(host), f"subnet {value} -> hote representatif {host}"
+        ip = ipaddress.ip_address(v)
+        return str(ip), None
+    except ValueError:
+        return None, f"'{value}' non testable (pas une IP - objet/hostname)"
 
 
 def expand_services(services):
@@ -56,15 +83,30 @@ def expand_services(services):
 
 def check_flow(pano, target, ticket, application=None, raw=False):
     """Teste toutes les combinaisons src x dst x service. Retourne un dict de resultat."""
-    combos = []
     notes = []
+    # Convertit sources/destinations en IP uniques testables
+    src_hosts, dst_hosts = [], []
+    for s in ticket["sources"]:
+        ip, note = to_host(s)
+        if note:
+            notes.append(f"SOURCE {note}")
+        if ip:
+            src_hosts.append(ip)
+    for d in ticket["destinations"]:
+        ip, note = to_host(d)
+        if note:
+            notes.append(f"DEST {note}")
+        if ip:
+            dst_hosts.append(ip)
+
+    combos = []
     for proto, port, note in expand_services(ticket["services"]):
         if note:
             notes.append(note)
         if port is None or proto is None:
             continue
-        for src in ticket["sources"]:
-            for dst in ticket["destinations"]:
+        for src in src_hosts:
+            for dst in dst_hosts:
                 combos.append((src, dst, proto, port))
 
     if not combos:
