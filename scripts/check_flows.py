@@ -172,10 +172,16 @@ def main():
             print(json.dumps(result, indent=2, ensure_ascii=False))
 
         status, verdicts = classify_result(result)
-        print(f"  => {status}  (verdicts bruts: {verdicts or 'aucun'})")
+        # Lien de verification dans l'UI AlgoSec (localhost -> vrai serveur)
+        ui = result.get("queryUIResult") or ""
+        if ui:
+            ui = ui.replace("https://localhost", client.server).replace("http://localhost", client.server)
+        print(f"  => {status}  (finalResult: {verdicts or 'aucun'})")
+        if ui:
+            print(f"     verif UI: {ui}")
         results_by_id[rid] = status
         counts[status] = counts.get(status, 0) + 1
-        reports.append({"id": rid, "status": status, "verdicts": verdicts,
+        reports.append({"id": rid, "status": status, "verdicts": verdicts, "ui": ui,
                         "sources": t["sources"], "destinations": t["destinations"],
                         "services": services})
 
