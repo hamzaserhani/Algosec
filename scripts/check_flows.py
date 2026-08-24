@@ -173,10 +173,12 @@ def main():
         try:
             result = client.query(t["sources"], t["destinations"], services)
         except Exception as e:
-            print(f"  [ERREUR] {str(e).splitlines()[0]}")
+            full = str(e)
+            # Affiche le corps complet de l'erreur (diagnostic du 400 AFA)
+            print(f"  [ERREUR] {full[:1200]}")
             results_by_id[rid] = "ERROR"
             counts["ERROR"] = counts.get("ERROR", 0) + 1
-            reports.append({"id": rid, "status": "ERROR", "error": str(e).splitlines()[0]})
+            reports.append({"id": rid, "status": "ERROR", "error": full[:1200]})
             continue
 
         if args.raw:
