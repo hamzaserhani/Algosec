@@ -28,6 +28,7 @@ Config (config.json) :
 import json
 import os
 import re
+import time
 from urllib.parse import quote
 
 import requests
@@ -97,6 +98,56 @@ class PanoramaClient:
                     "hostname": host.group(1).strip() if host else "",
                 })
         return devices
+
+    def query_traffic_log(self, query, nlogs=20, max_wait=60, poll=2.0):
+        """Interroge les logs de trafic (agreges sur tous les firewalls via Panorama).
+
+        query : filtre style Monitor (ex: "(addr.src in 10.0.0.0/8) and
+                (action eq allow) and (time_generated geq '2026/07/01 00:00:00')").
+        Retourne la liste des entrees [{action, src, dst, dport, rule, time}].
+        Asynchrone : submit -> job id -> poll jusqu'a FIN.
+        """
+        if not self.api_key:
+            self.keygen()
+        # 1. Submit
+        params = {"type": "log", "log-type": "traffic", "query": query,
+                  "nlogs": str(nlogs), "key": self.api_key}
+        if self.debug:
+            print(f"[DEBUG] Panorama log query: {query[:250]}")
+        resp = self.session.get(f"{self.server}/api/", params=params)
+        resp.raise_for_status()
+        job = re.search(r"<job>(\d+)</job>", resp.text)
+        if not job:
+            raise Exception(f"Log query : pas de job id. Reponse: {resp.text[:300]}")
+        job_id = job.group(1)
+
+        # 2. Poll
+        waited = 0.0
+        while waited < max_wait:
+            r = self.session.get(f"{self.server}/api/", params={
+                "type": "log", "action": "get", "job-id": job_id, "key": self.api_key})
+            r.raise_for_status()
+            status = re.search(r"<status>(\w+)</status>", r.text)
+            if status and status.group(1).upper() in ("FIN", "FINISHED"):
+                return self._parse_log_entries(r.text)
+            time.sleep(poll)
+            waited += poll
+        raise Exception(f"Log query timeout ({max_wait}s) pour job {job_id}")
+
+    @staticmethod
+    def _parse_log_entries(xml):
+        """Parse les <entry> d'une reponse log en dicts."""
+        entries = []
+        for body in re.findall(r"<entry[^>]*>(.*?)</entry>", xml, re.S):
+            def g(tag):
+                m = re.search(rf"<{tag}>(.*?)</{tag}>", body, re.S)
+                return m.group(1).strip() if m else None
+            entries.append({
+                "action": g("action"), "src": g("src"), "dst": g("dst"),
+                "dport": g("dport"), "rule": g("rule"), "time": g("time_generated"),
+                "app": g("app"),
+            })
+        return entries
 
     def test_policy_match(self, serial, source, destination, dport, protocol,
                           application=None, from_zone=None, to_zone=None):
