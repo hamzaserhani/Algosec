@@ -60,6 +60,7 @@ def main():
     parser.add_argument("--list-dg", action="store_true", help="Noms EXACTS des device-groups (depuis la config)")
     parser.add_argument("--find", help="hostname/serial du firewall")
     parser.add_argument("--running", help="Serial du firewall : dump la policy EFFECTIVE (show running security-policy)")
+    parser.add_argument("--pushed", help="Serial du firewall : dump la policy poussee en XML (show config pushed-shared-policy)")
     parser.add_argument("--dump", help="nom du device-group a dumper")
     parser.add_argument("--json", dest="json_path", help="sauve le dump complet")
 
@@ -86,6 +87,25 @@ def main():
     if args.find:
         dg = pano.find_device_group(args.find)
         print(f"Device-group de {args.find} : {dg}")
+        return
+
+    if args.pushed:
+        # Policy poussee (Panorama -> firewall) en XML : regles + objets effectifs.
+        xml = pano._op("<show><config><pushed-shared-policy></pushed-shared-policy></config></show>",
+                       target=args.pushed)
+        n_rules = len(re.findall(r"<rules>", xml))
+        print(f"[pushed-shared-policy] taille XML: {len(xml)} caracteres")
+        for section in ("security", "address", "service", "address-group"):
+            cnt = len(re.findall(rf"<{section}>", xml))
+            print(f"  <{section}> blocs: {cnt}")
+        # Exemple de regle security
+        m = re.search(r"<security>.*?(<entry\b.*?</entry>)", xml, re.S)
+        print("\n--- Exemple de REGLE security ---")
+        print((m.group(1)[:1600]) if m else "(non trouve - colle-moi un extrait)")
+        if args.json_path:
+            with open(args.json_path, "w", encoding="utf-8") as f:
+                f.write(xml)
+            print(f"\n[OK] Policy poussee -> {args.json_path}")
         return
 
     if args.running:
