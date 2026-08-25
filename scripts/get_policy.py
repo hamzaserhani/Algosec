@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--devicegroups", action="store_true")
     parser.add_argument("--list-dg", action="store_true", help="Noms EXACTS des device-groups (depuis la config)")
     parser.add_argument("--find", help="hostname/serial du firewall")
+    parser.add_argument("--running", help="Serial du firewall : dump la policy EFFECTIVE (show running security-policy)")
     parser.add_argument("--dump", help="nom du device-group a dumper")
     parser.add_argument("--json", dest="json_path", help="sauve le dump complet")
 
@@ -85,6 +86,22 @@ def main():
     if args.find:
         dg = pano.find_device_group(args.find)
         print(f"Device-group de {args.find} : {dg}")
+        return
+
+    if args.running:
+        # Policy EFFECTIVE aplatie sur le firewall (hierarchie deja resolue).
+        xml = pano._op("<show><running><security-policy></security-policy></running></show>",
+                       target=args.running)
+        print(f"[running security-policy] {count_entries(xml)} regle(s) effective(s)\n")
+        print("--- 2 premieres regles ---")
+        entries = re.findall(r"(<entry\b.*?</entry>)", xml, re.S)
+        for e in entries[:2]:
+            print(e[:1400])
+            print("...")
+        if args.json_path:
+            with open(args.json_path, "w", encoding="utf-8") as f:
+                f.write(xml)
+            print(f"\n[OK] Policy effective -> {args.json_path}")
         return
 
     if args.dump:
