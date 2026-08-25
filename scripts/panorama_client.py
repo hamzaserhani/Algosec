@@ -110,6 +110,18 @@ class PanoramaClient:
         resp.raise_for_status()
         return resp.text
 
+    def get_config_target(self, xpath, serial):
+        """get-config d'un firewall precis (target=serial) - ex: regles poussees."""
+        if not self.api_key:
+            self.keygen()
+        params = {"type": "config", "action": "get", "xpath": xpath,
+                  "target": serial, "key": self.api_key}
+        if self.debug:
+            print(f"[DEBUG] get-config target={serial} xpath={xpath[:140]}")
+        resp = self.session.get(f"{self.server}/api/", params=params)
+        resp.raise_for_status()
+        return resp.text
+
     def find_device_group(self, hostname_or_serial):
         """Retourne le nom du device-group contenant ce firewall (ou None).
 

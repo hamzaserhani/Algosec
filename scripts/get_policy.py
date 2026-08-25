@@ -62,6 +62,7 @@ def main():
     parser.add_argument("--running", help="Serial du firewall : dump la policy EFFECTIVE (show running security-policy)")
     parser.add_argument("--pushed", help="Serial du firewall : dump la policy poussee en XML (show config pushed-shared-policy)")
     parser.add_argument("--sample-rule", action="store_true", help="Affiche 1 exemple de regle shared pre-rulebase (leger)")
+    parser.add_argument("--fw-rules", help="Serial : localise les regles effectives du firewall (pushed pre/post + local)")
     parser.add_argument("--dump", help="nom du device-group a dumper")
     parser.add_argument("--json", dest="json_path", help="sauve le dump complet")
 
@@ -88,6 +89,33 @@ def main():
     if args.find:
         dg = pano.find_device_group(args.find)
         print(f"Device-group de {args.find} : {dg}")
+        return
+
+    if args.fw_rules:
+        # Localise les regles effectives d'un firewall (interrogation ciblee target=serial).
+        serial = args.fw_rules
+        candidates = {
+            "pushed_pre (vsys1)": "/config/panorama/vsys/entry[@name='vsys1']/pre-rulebase/security/rules",
+            "pushed_post (vsys1)": "/config/panorama/vsys/entry[@name='vsys1']/post-rulebase/security/rules",
+            "local (vsys1)": "/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/rulebase/security/rules",
+            "pushed_pre (panorama dg)": "/config/panorama/pre-rulebase/security/rules",
+            "pushed_post (panorama dg)": "/config/panorama/post-rulebase/security/rules",
+        }
+        best = None
+        for label, xpath in candidates.items():
+            try:
+                xml = pano.get_config_target(xpath, serial)
+                n = count_entries(xml)
+            except Exception as e:
+                print(f"  [{label}] erreur: {str(e).splitlines()[0]}")
+                continue
+            print(f"  [{label}] {n} regle(s)")
+            if n and best is None:
+                best = (label, xml)
+        if best:
+            print(f"\n--- Exemple de regle ({best[0]}) ---")
+            m = re.search(r"(<entry\b.*?</entry>)", best[1], re.S)
+            print(m.group(1)[:1500] if m else "(?)")
         return
 
     if args.sample_rule:
