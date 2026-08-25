@@ -99,6 +99,34 @@ class PanoramaClient:
                 })
         return devices
 
+    def get_config(self, xpath):
+        """Recupere une portion de config (type=config&action=get). Retourne le XML."""
+        if not self.api_key:
+            self.keygen()
+        params = {"type": "config", "action": "get", "xpath": xpath, "key": self.api_key}
+        if self.debug:
+            print(f"[DEBUG] Panorama get-config xpath={xpath[:160]}")
+        resp = self.session.get(f"{self.server}/api/", params=params)
+        resp.raise_for_status()
+        return resp.text
+
+    def find_device_group(self, hostname_or_serial):
+        """Retourne le nom du device-group contenant ce firewall (ou None).
+
+        Parcourt 'show devicegroups' et cherche le hostname/serial dans chaque DG.
+        """
+        xml = self._op("<show><devicegroups></devicegroups></show>")
+        target = hostname_or_serial.lower()
+        # Decoupe par device-group de 1er niveau : <entry name="DG"> ... jusqu'au prochain
+        for m in re.finditer(r'<entry name="([^"]+)">(.*?)(?=<entry name="[^"]+">\s*<devices>|</devicegroups>)',
+                             xml, re.S):
+            name, body = m.group(1), m.group(2)
+            if "<devices>" not in body:
+                continue
+            if target in body.lower():
+                return name
+        return None
+
     def query_traffic_log(self, query, nlogs=20, max_wait=60, poll=2.0):
         """Interroge les logs de trafic (agreges sur tous les firewalls via Panorama).
 
