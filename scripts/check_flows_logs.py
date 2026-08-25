@@ -58,10 +58,40 @@ def is_ip_like(value):
         return False
 
 
+def expand_addr_for_log(value):
+    """Convertit une valeur adresse en formes acceptees par 'addr in' (logs).
+
+    PAN-OS log filter accepte IP et subnet, PAS les plages 'a-b'. Une plage est
+    convertie en CIDR(s). Si trop de blocs (>8), on prend le reseau englobant.
+    """
+    v = (value or "").strip()
+    if "-" in v and "/" not in v:
+        try:
+            a_s, b_s = (x.strip() for x in v.split("-", 1))
+            a, b = ipaddress.ip_address(a_s), ipaddress.ip_address(b_s)
+            cidrs = list(ipaddress.summarize_address_range(a, b))
+            if len(cidrs) <= 8:
+                return [str(c) for c in cidrs]
+            # trop de blocs -> plus petit reseau englobant les 2 bornes
+            plen = a.max_prefixlen
+            while plen > 0:
+                net = ipaddress.ip_network(f"{a_s}/{plen}", strict=False)
+                if b in net:
+                    return [str(net)]
+                plen -= 1
+            return ["0.0.0.0/0"]
+        except ValueError:
+            return [v]
+    return [v]
+
+
 def build_log_query(sources, destinations, ports, action, since_str):
     """Construit un filtre log Panorama pour un flux."""
     def group(field, values, op="in"):
-        parts = [f"({field} {op} {v})" for v in values]
+        expanded = []
+        for v in values:
+            expanded.extend(expand_addr_for_log(v))
+        parts = [f"({field} {op} {v})" for v in expanded]
         return "(" + " or ".join(parts) + ")" if parts else ""
 
     clauses = [f"(time_generated geq '{since_str}')", f"(action eq {action})"]
