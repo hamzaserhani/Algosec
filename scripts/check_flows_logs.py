@@ -156,9 +156,12 @@ def main():
     parser.add_argument("--json", dest="json_path", help="Sauve le rapport en JSON")
     parser.add_argument("--raw", action="store_true", help="Affiche les echantillons de logs")
     parser.add_argument("--no-write", action="store_true", help="Ne pas ecrire la colonne deja_autorise")
+    parser.add_argument("--recheck", help="Ne (re)tester que les flux dont deja_autorise est dans cette liste "
+                                          "(ex: ERROR,NO_TRAFFIC,BLANK). BLANK = non encore teste.")
 
     args = parser.parse_args()
     only_ids = {x.strip() for x in args.only.split(",")} if args.only else None
+    recheck = {x.strip().upper() for x in args.recheck.split(",")} if args.recheck else None
 
     with open(args.config, "r") as f:
         source_object_map = json.load(f).get("source_object_map") or {}
@@ -174,6 +177,11 @@ def main():
             continue
         if only_ids is not None and (ticket.get("id") or "").strip() not in only_ids:
             continue
+        # Filtre --recheck : ne (re)teste que les statuts demandes (BLANK = vide)
+        if recheck is not None:
+            current = (ticket.get("deja_autorise") or "").strip().upper() or "BLANK"
+            if current not in recheck:
+                continue
         apply_source_object_map(ticket, source_object_map)
         flows.append(ticket)
 
