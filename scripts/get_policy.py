@@ -87,12 +87,26 @@ def main():
             dump[label] = xml
             print(f"[{label}] {count_entries(xml)} entree(s)")
 
-        print("\n--- Exemple de REGLE (dg_pre_rules) ---")
-        print(first_entry(dump.get("dg_pre_rules"))[:1500])
-        print("\n--- Exemple d'OBJET ADRESSE (dg_address) ---")
-        print(first_entry(dump.get("dg_address"))[:600])
-        print("\n--- Exemple de SERVICE (dg_service) ---")
-        print(first_entry(dump.get("dg_service"))[:600])
+        def sample(*labels):
+            """Renvoie le 1er exemple non vide parmi les sections listees."""
+            for lab in labels:
+                xml = dump.get(lab)
+                if xml and count_entries(xml):
+                    return lab, first_entry(xml)
+            return labels[0], "(aucune)"
+
+        lab, ex = sample("dg_pre_rules", "shared_pre_rules", "dg_post_rules", "shared_post_rules")
+        print(f"\n--- Exemple de REGLE ({lab}) ---")
+        print(ex[:1800])
+        lab, ex = sample("dg_address", "shared_address")
+        print(f"\n--- Exemple d'OBJET ADRESSE ({lab}) ---")
+        print(ex[:600])
+        lab, ex = sample("dg_address_group", "shared_address_group")
+        print(f"\n--- Exemple de GROUPE D'ADRESSES ({lab}) ---")
+        print(ex[:800])
+        lab, ex = sample("dg_service", "shared_service")
+        print(f"\n--- Exemple de SERVICE ({lab}) ---")
+        print(ex[:600])
 
         if args.json_path:
             with open(args.json_path, "w", encoding="utf-8") as f:
