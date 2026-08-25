@@ -84,7 +84,7 @@ def flow_ports(services):
     return ports
 
 
-def check_via_logs(pano, ticket, since_str):
+def check_via_logs(pano, ticket, since_str, timeout=120):
     """Interroge les logs allow/deny. Retourne (status, detail)."""
     sources = ticket["sources"]
     destinations = ticket["destinations"]
@@ -101,7 +101,8 @@ def check_via_logs(pano, ticket, since_str):
     q_allow = build_log_query(sources, destinations, ports, "allow", since_str)
     q_deny = build_log_query(sources, destinations, ports, "deny", since_str)
     # Soumet les 2 requetes d'un coup puis poll les 2 -> ~2x plus rapide.
-    allow_logs, deny_logs = pano.query_traffic_logs_parallel([q_allow, q_deny], nlogs=5)
+    allow_logs, deny_logs = pano.query_traffic_logs_parallel(
+        [q_allow, q_deny], nlogs=5, max_wait=timeout)
 
     detail = {"allow_count": len(allow_logs), "deny_count": len(deny_logs),
               "allow_sample": allow_logs[:2], "deny_sample": deny_logs[:2]}
@@ -121,6 +122,7 @@ def main():
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--only", help="Ne tester que ces '#' (liste separee par virgules)")
     parser.add_argument("--days", type=int, default=30, help="Fenetre logs en jours (defaut 30)")
+    parser.add_argument("--timeout", type=int, default=120, help="Timeout par requete log en s (defaut 120)")
     parser.add_argument("--json", dest="json_path", help="Sauve le rapport en JSON")
     parser.add_argument("--raw", action="store_true", help="Affiche les echantillons de logs")
     parser.add_argument("--no-write", action="store_true", help="Ne pas ecrire la colonne deja_autorise")
@@ -158,7 +160,7 @@ def main():
         rid = t.get("id") or "?"
         print(f"\n=== Flux #{rid} : {t['sources']} -> {t['destinations']} svc={t['services']} ===")
         try:
-            status, detail = check_via_logs(pano, t, since_str)
+            status, detail = check_via_logs(pano, t, since_str, timeout=args.timeout)
         except Exception as e:
             status, detail = "ERROR", {"error": str(e).splitlines()[0]}
             print(f"  [ERREUR] {detail['error']}")
