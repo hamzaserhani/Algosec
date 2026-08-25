@@ -61,6 +61,7 @@ def main():
     parser.add_argument("--find", help="hostname/serial du firewall")
     parser.add_argument("--running", help="Serial du firewall : dump la policy EFFECTIVE (show running security-policy)")
     parser.add_argument("--pushed", help="Serial du firewall : dump la policy poussee en XML (show config pushed-shared-policy)")
+    parser.add_argument("--sample-rule", action="store_true", help="Affiche 1 exemple de regle shared pre-rulebase (leger)")
     parser.add_argument("--dump", help="nom du device-group a dumper")
     parser.add_argument("--json", dest="json_path", help="sauve le dump complet")
 
@@ -87,6 +88,15 @@ def main():
     if args.find:
         dg = pano.find_device_group(args.find)
         print(f"Device-group de {args.find} : {dg}")
+        return
+
+    if args.sample_rule:
+        xml = pano.get_config("/config/shared/pre-rulebase/security/rules")
+        print(f"[shared pre-rules] {count_entries(xml)} regle(s)\n")
+        print("--- 2 premieres regles ---")
+        for e in re.findall(r"(<entry\b.*?</entry>)", xml, re.S)[:2]:
+            print(e[:1600])
+            print("---")
         return
 
     if args.pushed:
