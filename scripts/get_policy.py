@@ -57,6 +57,7 @@ def main():
     parser = argparse.ArgumentParser(description="Dump policy Panorama (calibration)")
     parser.add_argument("config", nargs="?", default="config.json")
     parser.add_argument("--devicegroups", action="store_true")
+    parser.add_argument("--list-dg", action="store_true", help="Noms EXACTS des device-groups (depuis la config)")
     parser.add_argument("--find", help="hostname/serial du firewall")
     parser.add_argument("--dump", help="nom du device-group a dumper")
     parser.add_argument("--json", dest="json_path", help="sauve le dump complet")
@@ -68,6 +69,17 @@ def main():
     if args.devicegroups:
         xml = pano._op("<show><devicegroups></devicegroups></show>")
         print(xml[:4000])
+        return
+
+    if args.list_dg:
+        # Noms exacts des device-groups + nombre de regles pre/post de chacun
+        xml = pano.get_config(f"/config/devices/entry[@name='{DEV}']/device-group")
+        names = re.findall(r'<entry name="([^"]+)"', xml)
+        print(f"{len(names)} device-group(s) dans la config :")
+        for n in names:
+            pre = pano.get_config(dg_xpath(n, "pre-rulebase/security/rules"))
+            post = pano.get_config(dg_xpath(n, "post-rulebase/security/rules"))
+            print(f"  '{n}'  (pre={count_entries(pre)}, post={count_entries(post)})")
         return
 
     if args.find:
