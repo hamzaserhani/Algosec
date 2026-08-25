@@ -127,17 +127,10 @@ class PanoramaClient:
                 return name
         return None
 
-    def query_traffic_log(self, query, nlogs=20, max_wait=60, poll=2.0):
-        """Interroge les logs de trafic (agreges sur tous les firewalls via Panorama).
-
-        query : filtre style Monitor (ex: "(addr.src in 10.0.0.0/8) and
-                (action eq allow) and (time_generated geq '2026/07/01 00:00:00')").
-        Retourne la liste des entrees [{action, src, dst, dport, rule, time}].
-        Asynchrone : submit -> job id -> poll jusqu'a FIN.
-        """
+    def submit_log_job(self, query, nlogs=20):
+        """Soumet une requete log et retourne le job id (asynchrone)."""
         if not self.api_key:
             self.keygen()
-        # 1. Submit
         params = {"type": "log", "log-type": "traffic", "query": query,
                   "nlogs": str(nlogs), "key": self.api_key}
         if self.debug:
@@ -147,9 +140,10 @@ class PanoramaClient:
         job = re.search(r"<job>(\d+)</job>", resp.text)
         if not job:
             raise Exception(f"Log query : pas de job id. Reponse: {resp.text[:300]}")
-        job_id = job.group(1)
+        return job.group(1)
 
-        # 2. Poll
+    def fetch_log_job(self, job_id, max_wait=60, poll=1.0):
+        """Poll un job log jusqu'a FIN et retourne les entrees."""
         waited = 0.0
         while waited < max_wait:
             r = self.session.get(f"{self.server}/api/", params={
@@ -161,6 +155,19 @@ class PanoramaClient:
             time.sleep(poll)
             waited += poll
         raise Exception(f"Log query timeout ({max_wait}s) pour job {job_id}")
+
+    def query_traffic_log(self, query, nlogs=20, max_wait=60, poll=1.0):
+        """Requete log (submit + poll). Voir submit_log_job/fetch_log_job pour paralleliser."""
+        job_id = self.submit_log_job(query, nlogs)
+        return self.fetch_log_job(job_id, max_wait=max_wait, poll=poll)
+
+    def query_traffic_logs_parallel(self, queries, nlogs=20, max_wait=60, poll=1.0):
+        """Soumet plusieurs requetes d'un coup puis poll toutes -> divise l'attente.
+
+        queries : liste de filtres. Retourne une liste de listes d'entrees (meme ordre).
+        """
+        job_ids = [self.submit_log_job(q, nlogs) for q in queries]
+        return [self.fetch_log_job(jid, max_wait=max_wait, poll=poll) for jid in job_ids]
 
     @staticmethod
     def _parse_log_entries(xml):

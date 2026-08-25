@@ -99,10 +99,9 @@ def check_via_logs(pano, ticket, since_str):
                           "note": "source/dest non-IP : verifier manuellement"}
 
     q_allow = build_log_query(sources, destinations, ports, "allow", since_str)
-    allow_logs = pano.query_traffic_log(q_allow, nlogs=5)
-
     q_deny = build_log_query(sources, destinations, ports, "deny", since_str)
-    deny_logs = pano.query_traffic_log(q_deny, nlogs=5)
+    # Soumet les 2 requetes d'un coup puis poll les 2 -> ~2x plus rapide.
+    allow_logs, deny_logs = pano.query_traffic_logs_parallel([q_allow, q_deny], nlogs=5)
 
     detail = {"allow_count": len(allow_logs), "deny_count": len(deny_logs),
               "allow_sample": allow_logs[:2], "deny_sample": deny_logs[:2]}
