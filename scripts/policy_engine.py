@@ -73,11 +73,63 @@ class PolicyEngine:
         self.pano = pano
         self.serial = serial     # firewall cible (target)
         self.rules = []          # rulebase effective, dans l'ordre
-        self._addr_cache = {}
+        self._addr_cache = {}    # name -> list[ip_network] | "any"
         self._svc_cache = {}
+        # Tables d'objets chargees en masse (name -> definition brute)
+        self._addr_objs = {}     # name -> ("netmask"|"range", valeur)
+        self._grp_objs = {}      # name -> [membres]
+        self._svc_objs = {}      # name -> [(proto, lo, hi)]
 
     def _get(self, xpath):
         return self.pano.get_config_target(xpath, self.serial)
+
+    # --- Chargement en masse des objets (rapide : peu d'appels) ---
+    def load_objects(self):
+        paths_addr = ["/config/shared/address", VSYS + "/address", LOCAL + "/address"]
+        paths_grp = ["/config/shared/address-group", VSYS + "/address-group"]
+        paths_svc = ["/config/shared/service", VSYS + "/service"]
+
+        for p in paths_addr:
+            xml = self._get(p)
+            for entry in re.findall(r'<entry\s+name="([^"]+)"[^>]*>(.*?)</entry>', xml, re.S):
+                name, body = entry
+                if name in self._addr_objs:
+                    continue
+                nm = _text(body, "ip-netmask")
+                rg = _text(body, "ip-range")
+                if nm:
+                    self._addr_objs[name] = ("netmask", nm)
+                elif rg:
+                    self._addr_objs[name] = ("range", rg)
+
+        for p in paths_grp:
+            xml = self._get(p)
+            for entry in re.findall(r'<entry\s+name="([^"]+)"[^>]*>(.*?)</entry>', xml, re.S):
+                name, body = entry
+                if name not in self._grp_objs:
+                    self._grp_objs[name] = _members(body, "static")
+
+        for p in paths_svc:
+            xml = self._get(p)
+            for entry in re.findall(r'<entry\s+name="([^"]+)"[^>]*>(.*?)</entry>', xml, re.S):
+                name, body = entry
+                if name in self._svc_objs:
+                    continue
+                out = []
+                for proto in ("tcp", "udp"):
+                    m = re.search(rf"<{proto}>(.*?)</{proto}>", body, re.S)
+                    if m:
+                        port = _text(m.group(1), "port") or ""
+                        for part in port.split(","):
+                            part = part.strip()
+                            if "-" in part:
+                                lo, hi = part.split("-", 1)
+                                if lo.isdigit() and hi.isdigit():
+                                    out.append((proto, int(lo), int(hi)))
+                            elif part.isdigit():
+                                out.append((proto, int(part), int(part)))
+                self._svc_objs[name] = out
+        return len(self._addr_objs), len(self._grp_objs), len(self._svc_objs)
 
     def _first_nonempty(self, paths, name):
         """Renvoie le 1er XML non vide parmi les chemins (formates avec name)."""
@@ -107,8 +159,8 @@ class PolicyEngine:
                 })
         return len(self.rules)
 
-    # --- Resolution d'objets (a la demande, cache) ---
-    def resolve_addr(self, name):
+    # --- Resolution d'objets (tables en memoire, cache) ---
+    def resolve_addr(self, name, _depth=0):
         if name.lower() == "any":
             return "any"
         if name in self._addr_cache:
@@ -121,28 +173,24 @@ class PolicyEngine:
             return nets
         except ValueError:
             pass
-        # Objet adresse (shared / pushed vsys / local)
-        xml = self._first_nonempty(ADDR_PATHS, name)
-        netmask = _text(xml, "ip-netmask")
-        iprange = _text(xml, "ip-range")
-        if netmask:
-            try:
-                nets = [ipaddress.ip_network(netmask, strict=False)]
-            except ValueError:
-                nets = []
-        elif iprange and "-" in iprange:
-            a, b = iprange.split("-", 1)
-            try:
-                nets = list(ipaddress.summarize_address_range(
-                    ipaddress.ip_address(a.strip()), ipaddress.ip_address(b.strip())))
-            except ValueError:
-                nets = []
-        else:
-            # Groupe d'adresses (membres statiques) ?
-            gxml = self._first_nonempty(ADDRGRP_PATHS, name)
-            members = _members(gxml, "static")
-            for mem in members:
-                r = self.resolve_addr(mem)
+        obj = self._addr_objs.get(name)
+        if obj:
+            kind, val = obj
+            if kind == "netmask":
+                try:
+                    nets = [ipaddress.ip_network(val, strict=False)]
+                except ValueError:
+                    nets = []
+            elif kind == "range" and "-" in val:
+                a, b = val.split("-", 1)
+                try:
+                    nets = list(ipaddress.summarize_address_range(
+                        ipaddress.ip_address(a.strip()), ipaddress.ip_address(b.strip())))
+                except ValueError:
+                    nets = []
+        elif name in self._grp_objs and _depth < 10:
+            for mem in self._grp_objs[name]:
+                r = self.resolve_addr(mem, _depth + 1)
                 if r == "any":
                     self._addr_cache[name] = "any"
                     return "any"
@@ -156,32 +204,7 @@ class PolicyEngine:
             return "any"
         if low == "application-default":
             return "app-default"
-        if name in self._svc_cache:
-            return self._svc_cache[name]
-        out = []
-        xml = self._first_nonempty(SVC_PATHS, name)
-        for proto in ("tcp", "udp"):
-            m = re.search(rf"<{proto}>(.*?)</{proto}>", xml, re.S)
-            if m:
-                port = _text(m.group(1), "port") or ""
-                for part in port.split(","):
-                    part = part.strip()
-                    if "-" in part:
-                        lo, hi = part.split("-", 1)
-                        out.append((proto, int(lo), int(hi)))
-                    elif part.isdigit():
-                        out.append((proto, int(part), int(part)))
-        if not out:
-            # service-group ?
-            gxml = self._first_nonempty(SVCGRP_PATHS, name)
-            for mem in _members(gxml, "members"):
-                r = self.resolve_svc(mem)
-                if r in ("any", "app-default"):
-                    self._svc_cache[name] = r
-                    return r
-                out.extend(r)
-        self._svc_cache[name] = out
-        return out
+        return self._svc_objs.get(name, [])
 
     # --- Matching ---
     def _addr_match(self, members, ip):
@@ -303,6 +326,8 @@ def main():
     for r in eng.rules:
         by_sec[r["section"]] = by_sec.get(r["section"], 0) + 1
     print(f"[OK] {n} regles effectives chargees ({by_sec}).")
+    na, ng, ns = eng.load_objects()
+    print(f"[OK] objets charges : {na} adresses, {ng} groupes, {ns} services.")
 
     if args.src and args.dst and args.svc:
         proto, port = parse_svc(args.svc)
