@@ -208,8 +208,23 @@ class PolicyEngine:
                     return True, True
         return False, True
 
-    def evaluate(self, src, dst, proto, port):
-        """Evalue un (src,dst,proto,port). Retourne dict {status, rule, ...}."""
+    @staticmethod
+    def _app_match(members, flow_app):
+        """Retourne (applicable, confident) pour le champ application.
+
+        - regle 'any'                 -> (True, True)   (agnostique de l'app)
+        - flow_app connu et dans regle -> (True, True)
+        - flow_app connu et absent     -> (False, True) (la regle ne s'applique pas)
+        - flow_app inconnu, regle app-specifique -> (True, False) (peut s'appliquer, incertain)
+        """
+        if not members or members == ["any"]:
+            return True, True
+        if flow_app:
+            return (flow_app.lower() in [m.lower() for m in members]), True
+        return True, False
+
+    def evaluate(self, src, dst, proto, port, flow_app=None):
+        """Evalue un (src,dst,proto,port[,app]). Retourne dict {status, rule, ...}."""
         for rule in self.rules:
             if rule["disabled"]:
                 continue
@@ -221,15 +236,22 @@ class PolicyEngine:
                 continue
             if not self._addr_match(rule["destination"], dst):
                 continue
-            svc_ok, confident = self._svc_match(rule["service"], proto, port)
+            # Application : si la regle est app-specifique et que l'app du flux
+            # n'y est pas, la regle ne s'applique pas -> on continue.
+            app_ok, app_confident = self._app_match(rule["application"], flow_app)
+            if not app_ok:
+                continue
+            svc_ok, svc_confident = self._svc_match(rule["service"], proto, port)
             if not svc_ok:
                 continue
             action = rule["action"]
+            confident = app_confident and svc_confident
             status = ("ALLOWED" if action == "allow" else "BLOCKED")
             if not confident:
                 status = "REVIEW"
             return {"status": status, "rule": rule["name"], "action": action,
-                    "confident": confident, "section": rule.get("section")}
+                    "confident": confident, "section": rule.get("section"),
+                    "app_specific": not (not rule["application"] or rule["application"] == ["any"])}
         return {"status": "NO_MATCH", "rule": None, "section": None}
 
 
@@ -247,6 +269,7 @@ def main():
     parser.add_argument("--src", help="IP source")
     parser.add_argument("--dst", help="IP destination")
     parser.add_argument("--svc", help="service tcp/443")
+    parser.add_argument("--app", help="App-ID du flux (ex: ssl) - leve l'incertitude sur les regles app-specifiques")
     args = parser.parse_args()
 
     pano = PanoramaClient(args.config)
@@ -260,8 +283,8 @@ def main():
 
     if args.src and args.dst and args.svc:
         proto, port = parse_svc(args.svc)
-        res = eng.evaluate(args.src, args.dst, proto, port)
-        print(f"\n{args.src} -> {args.dst} {proto}/{port}")
+        res = eng.evaluate(args.src, args.dst, proto, port, flow_app=args.app)
+        print(f"\n{args.src} -> {args.dst} {proto}/{port}" + (f" app={args.app}" if args.app else ""))
         print(f"  => {res['status']}  (regle: {res.get('rule')}, section: {res.get('section')})")
 
 
