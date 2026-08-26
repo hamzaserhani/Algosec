@@ -195,14 +195,22 @@ class PolicyEngine:
                     return True
         return False
 
-    def _svc_match(self, members, proto, port):
-        """Retourne (match, confident)."""
+    def _svc_match(self, members, proto, port, ports_only=True):
+        """Retourne (match, confident) pour le port.
+
+        - service 'any'            -> match (tout port)
+        - service concret couvrant -> match confiant
+        - 'application-default'     -> en ports-only : NON match (port inconnu sans
+          l'app) ; en mode app-aware : match non confiant.
+        """
         for m in members:
             r = self.resolve_svc(m)
             if r == "any":
                 return True, True
             if r == "app-default":
-                return True, False  # match mais port non certain
+                if ports_only:
+                    continue  # port indeterminable -> cette regle ne matche pas
+                return True, False
             for (p, lo, hi) in r:
                 if p == proto and lo <= port <= hi:
                     return True, True
@@ -224,7 +232,13 @@ class PolicyEngine:
         return True, False
 
     def evaluate(self, src, dst, proto, port, flow_app=None):
-        """Evalue un (src,dst,proto,port[,app]). Retourne dict {status, rule, ...}."""
+        """Evalue un (src,dst,proto,port[,app]). Retourne dict {status, rule, ...}.
+
+        Mode ports-only (flow_app=None) : on ignore la dimension application et on
+        ne matche que sur port concret ; les regles 'application-default' sont
+        ignorees. Fournir flow_app active le mode app-aware.
+        """
+        ports_only = flow_app is None
         for rule in self.rules:
             if rule["disabled"]:
                 continue
@@ -236,12 +250,14 @@ class PolicyEngine:
                 continue
             if not self._addr_match(rule["destination"], dst):
                 continue
-            # Application : si la regle est app-specifique et que l'app du flux
-            # n'y est pas, la regle ne s'applique pas -> on continue.
-            app_ok, app_confident = self._app_match(rule["application"], flow_app)
-            if not app_ok:
-                continue
-            svc_ok, svc_confident = self._svc_match(rule["service"], proto, port)
+            # Application (mode app-aware seulement)
+            if ports_only:
+                app_confident = True
+            else:
+                app_ok, app_confident = self._app_match(rule["application"], flow_app)
+                if not app_ok:
+                    continue
+            svc_ok, svc_confident = self._svc_match(rule["service"], proto, port, ports_only)
             if not svc_ok:
                 continue
             action = rule["action"]
