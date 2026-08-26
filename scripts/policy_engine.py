@@ -27,41 +27,84 @@ from panorama_client import PanoramaClient
 
 
 def _members(block_xml, tag):
-    """Extrait les <member> d'un bloc <tag>...</tag>."""
-    m = re.search(rf"<{tag}>(.*?)</{tag}>", block_xml, re.S)
+    """Extrait les <member> d'un bloc <tag ...>...</tag> (attributs geres)."""
+    m = re.search(rf"<{tag}(?:\s[^>]*)?>(.*?)</{tag}>", block_xml, re.S)
     if not m:
         return []
-    return [x.strip() for x in re.findall(r"<member>(.*?)</member>", m.group(1), re.S)]
+    return [x.strip() for x in re.findall(r"<member(?:\s[^>]*)?>(.*?)</member>", m.group(1), re.S)]
 
 
 def _text(block_xml, tag):
-    m = re.search(rf"<{tag}>(.*?)</{tag}>", block_xml, re.S)
+    """Texte d'une balise <tag ...>...</tag> (attributs geres)."""
+    m = re.search(rf"<{tag}(?:\s[^>]*)?>(.*?)</{tag}>", block_xml, re.S)
     return m.group(1).strip() if m else None
 
 
-class PolicyEngine:
-    def __init__(self, pano):
-        self.pano = pano
-        self.rules = []          # regles shared pre, dans l'ordre
-        self._addr_cache = {}    # name -> list[ip_network] | "any"
-        self._svc_cache = {}     # name -> list[(proto, lo, hi)] | "any" | "app-default"
+# Sections de regles d'un firewall, dans l'ordre d'evaluation PAN-OS.
+VSYS = "/config/panorama/vsys/entry[@name='vsys1']"
+LOCAL = "/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']"
+RULE_SECTIONS = [
+    ("pushed_pre", f"{VSYS}/pre-rulebase/security/rules"),
+    ("local", f"{LOCAL}/rulebase/security/rules"),
+    ("pushed_post", f"{VSYS}/post-rulebase/security/rules"),
+]
+# Emplacements des objets (essayes dans l'ordre, avec target=serial).
+ADDR_PATHS = [
+    "/config/shared/address/entry[@name='{n}']",
+    VSYS + "/address/entry[@name='{n}']",
+    LOCAL + "/address/entry[@name='{n}']",
+]
+ADDRGRP_PATHS = [
+    "/config/shared/address-group/entry[@name='{n}']",
+    VSYS + "/address-group/entry[@name='{n}']",
+]
+SVC_PATHS = [
+    "/config/shared/service/entry[@name='{n}']",
+    VSYS + "/service/entry[@name='{n}']",
+]
+SVCGRP_PATHS = [
+    "/config/shared/service-group/entry[@name='{n}']",
+    VSYS + "/service-group/entry[@name='{n}']",
+]
 
-    # --- Chargement des regles ---
-    def load_shared_pre_rules(self):
-        xml = self.pano.get_config("/config/shared/pre-rulebase/security/rules")
+
+class PolicyEngine:
+    def __init__(self, pano, serial):
+        self.pano = pano
+        self.serial = serial     # firewall cible (target)
+        self.rules = []          # rulebase effective, dans l'ordre
+        self._addr_cache = {}
+        self._svc_cache = {}
+
+    def _get(self, xpath):
+        return self.pano.get_config_target(xpath, self.serial)
+
+    def _first_nonempty(self, paths, name):
+        """Renvoie le 1er XML non vide parmi les chemins (formates avec name)."""
+        for p in paths:
+            xml = self._get(p.format(n=name))
+            if re.search(r"<entry\b", xml):
+                return xml
+        return ""
+
+    # --- Chargement de la rulebase effective du firewall ---
+    def load_firewall_rules(self):
         self.rules = []
-        for entry in re.findall(r"<entry\b[^>]*>.*?</entry>", xml, re.S):
-            name = re.search(r'name="([^"]+)"', entry)
-            self.rules.append({
-                "name": name.group(1) if name else "?",
-                "disabled": (_text(entry, "disabled") or "no").lower() == "yes",
-                "source": _members(entry, "source"),
-                "destination": _members(entry, "destination"),
-                "service": _members(entry, "service"),
-                "application": _members(entry, "application"),
-                "category": _members(entry, "category"),
-                "action": (_text(entry, "action") or "").lower(),
-            })
+        for label, xpath in RULE_SECTIONS:
+            xml = self._get(xpath)
+            for entry in re.findall(r"<entry\b[^>]*>.*?</entry>", xml, re.S):
+                name = re.search(r'name="([^"]+)"', entry)
+                self.rules.append({
+                    "name": name.group(1) if name else "?",
+                    "section": label,
+                    "disabled": (_text(entry, "disabled") or "no").lower() == "yes",
+                    "source": _members(entry, "source"),
+                    "destination": _members(entry, "destination"),
+                    "service": _members(entry, "service"),
+                    "application": _members(entry, "application"),
+                    "category": _members(entry, "category"),
+                    "action": (_text(entry, "action") or "").lower(),
+                })
         return len(self.rules)
 
     # --- Resolution d'objets (a la demande, cache) ---
@@ -78,8 +121,8 @@ class PolicyEngine:
             return nets
         except ValueError:
             pass
-        # Objet adresse
-        xml = self.pano.get_config(f"/config/shared/address/entry[@name='{name}']")
+        # Objet adresse (shared / pushed vsys / local)
+        xml = self._first_nonempty(ADDR_PATHS, name)
         netmask = _text(xml, "ip-netmask")
         iprange = _text(xml, "ip-range")
         if netmask:
@@ -96,7 +139,7 @@ class PolicyEngine:
                 nets = []
         else:
             # Groupe d'adresses (membres statiques) ?
-            gxml = self.pano.get_config(f"/config/shared/address-group/entry[@name='{name}']")
+            gxml = self._first_nonempty(ADDRGRP_PATHS, name)
             members = _members(gxml, "static")
             for mem in members:
                 r = self.resolve_addr(mem)
@@ -116,7 +159,7 @@ class PolicyEngine:
         if name in self._svc_cache:
             return self._svc_cache[name]
         out = []
-        xml = self.pano.get_config(f"/config/shared/service/entry[@name='{name}']")
+        xml = self._first_nonempty(SVC_PATHS, name)
         for proto in ("tcp", "udp"):
             m = re.search(rf"<{proto}>(.*?)</{proto}>", xml, re.S)
             if m:
@@ -130,7 +173,7 @@ class PolicyEngine:
                         out.append((proto, int(part), int(part)))
         if not out:
             # service-group ?
-            gxml = self.pano.get_config(f"/config/shared/service-group/entry[@name='{name}']")
+            gxml = self._first_nonempty(SVCGRP_PATHS, name)
             for mem in _members(gxml, "members"):
                 r = self.resolve_svc(mem)
                 if r in ("any", "app-default"):
@@ -186,8 +229,8 @@ class PolicyEngine:
             if not confident:
                 status = "REVIEW"
             return {"status": status, "rule": rule["name"], "action": action,
-                    "confident": confident}
-        return {"status": "NO_SHARED_MATCH", "rule": None}
+                    "confident": confident, "section": rule.get("section")}
+        return {"status": "NO_MATCH", "rule": None, "section": None}
 
 
 def parse_svc(s):
@@ -200,6 +243,7 @@ def parse_svc(s):
 def main():
     parser = argparse.ArgumentParser(description="Moteur d'evaluation policy (test unitaire)")
     parser.add_argument("config", nargs="?", default="config.json")
+    parser.add_argument("--serial", required=True, help="Serial du firewall a evaluer")
     parser.add_argument("--src", help="IP source")
     parser.add_argument("--dst", help="IP destination")
     parser.add_argument("--svc", help="service tcp/443")
@@ -207,15 +251,18 @@ def main():
 
     pano = PanoramaClient(args.config)
     pano.keygen()
-    eng = PolicyEngine(pano)
-    n = eng.load_shared_pre_rules()
-    print(f"[OK] {n} regles shared pre chargees.")
+    eng = PolicyEngine(pano, args.serial)
+    n = eng.load_firewall_rules()
+    by_sec = {}
+    for r in eng.rules:
+        by_sec[r["section"]] = by_sec.get(r["section"], 0) + 1
+    print(f"[OK] {n} regles effectives chargees ({by_sec}).")
 
     if args.src and args.dst and args.svc:
         proto, port = parse_svc(args.svc)
         res = eng.evaluate(args.src, args.dst, proto, port)
         print(f"\n{args.src} -> {args.dst} {proto}/{port}")
-        print(f"  => {res['status']}  (regle: {res.get('rule')})")
+        print(f"  => {res['status']}  (regle: {res.get('rule')}, section: {res.get('section')})")
 
 
 if __name__ == "__main__":
