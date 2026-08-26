@@ -250,11 +250,18 @@ class PolicyEngine:
                 continue
             if not self._addr_match(rule["destination"], dst):
                 continue
-            # Application (mode app-aware seulement)
+            # Application
+            apps = rule["application"]
             if ports_only:
+                # On ne peut pas evaluer une regle app-specifique sans l'app du
+                # flux -> on la SAUTE (evite les faux match type block-teamviewer,
+                # block-ms-quick-assist). Seules les regles 'application any'
+                # donnent un verdict port-based.
+                if apps and apps != ["any"]:
+                    continue
                 app_confident = True
             else:
-                app_ok, app_confident = self._app_match(rule["application"], flow_app)
+                app_ok, app_confident = self._app_match(apps, flow_app)
                 if not app_ok:
                     continue
             svc_ok, svc_confident = self._svc_match(rule["service"], proto, port, ports_only)
