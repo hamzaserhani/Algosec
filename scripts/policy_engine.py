@@ -297,6 +297,7 @@ class PolicyEngine:
                 status = "REVIEW"
             return {"status": status, "rule": rule["name"], "action": action,
                     "confident": confident, "section": rule.get("section"),
+                    "detail": rule,
                     "app_specific": not (not rule["application"] or rule["application"] == ["any"])}
         return {"status": "NO_MATCH", "rule": None, "section": None}
 
@@ -334,6 +335,15 @@ def main():
         res = eng.evaluate(args.src, args.dst, proto, port, flow_app=args.app)
         print(f"\n{args.src} -> {args.dst} {proto}/{port}" + (f" app={args.app}" if args.app else ""))
         print(f"  => {res['status']}  (regle: {res.get('rule')}, section: {res.get('section')})")
+        d = res.get("detail")
+        if d:
+            print(f"\n  Regle matchee '{d['name']}' :")
+            print(f"    source      : {d['source']}")
+            print(f"    destination : {d['destination']}")
+            print(f"    service     : {d['service']}")
+            print(f"    application : {d['application']}")
+            print(f"    category    : {d['category']}")
+            print(f"    action      : {d['action']}")
 
 
 if __name__ == "__main__":
