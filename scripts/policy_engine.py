@@ -86,21 +86,30 @@ class PolicyEngine:
 
     # --- Chargement en masse des objets (rapide : peu d'appels) ---
     def load_objects(self):
-        # Device-groups references par les regles (leurs objets doivent etre charges)
+        # Device-groups references par les regles (leurs objets vivent sur Panorama).
         dgs = sorted({r.get("loc") for r in self.rules
                       if r.get("loc") and r["loc"] not in ("shared", "?")})
         dg_base = "/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='{dg}']"
 
-        paths_addr = ["/config/shared/address", VSYS + "/address", LOCAL + "/address"]
-        paths_grp = ["/config/shared/address-group", VSYS + "/address-group"]
-        paths_svc = ["/config/shared/service", VSYS + "/service"]
+        # (chemin, via_panorama) : shared/vsys/local via le firewall (target) ;
+        # objets device-group via Panorama (sans target).
+        paths_addr = [("/config/shared/address", False), (VSYS + "/address", False),
+                      (LOCAL + "/address", False)]
+        paths_grp = [("/config/shared/address-group", False), (VSYS + "/address-group", False)]
+        paths_svc = [("/config/shared/service", False), (VSYS + "/service", False)]
         for dg in dgs:
-            paths_addr.append(dg_base.format(dg=dg) + "/address")
-            paths_grp.append(dg_base.format(dg=dg) + "/address-group")
-            paths_svc.append(dg_base.format(dg=dg) + "/service")
+            paths_addr.append((dg_base.format(dg=dg) + "/address", True))
+            paths_grp.append((dg_base.format(dg=dg) + "/address-group", True))
+            paths_svc.append((dg_base.format(dg=dg) + "/service", True))
 
-        for p in paths_addr:
-            xml = self._get(p)
+        def fetch(path, via_pano):
+            try:
+                return self.pano.get_config(path) if via_pano else self._get(path)
+            except Exception:
+                return ""
+
+        for p, via in paths_addr:
+            xml = fetch(p, via)
             for entry in re.findall(r'<entry\s+name="([^"]+)"[^>]*>(.*?)</entry>', xml, re.S):
                 name, body = entry
                 if name in self._addr_objs:
@@ -112,15 +121,15 @@ class PolicyEngine:
                 elif rg:
                     self._addr_objs[name] = ("range", rg)
 
-        for p in paths_grp:
-            xml = self._get(p)
+        for p, via in paths_grp:
+            xml = fetch(p, via)
             for entry in re.findall(r'<entry\s+name="([^"]+)"[^>]*>(.*?)</entry>', xml, re.S):
                 name, body = entry
                 if name not in self._grp_objs:
                     self._grp_objs[name] = _members(body, "static")
 
-        for p in paths_svc:
-            xml = self._get(p)
+        for p, via in paths_svc:
+            xml = fetch(p, via)
             for entry in re.findall(r'<entry\s+name="([^"]+)"[^>]*>(.*?)</entry>', xml, re.S):
                 name, body = entry
                 if name in self._svc_objs:
