@@ -64,7 +64,9 @@ def main():
     parser.add_argument("--sample-rule", action="store_true", help="Affiche 1 exemple de regle shared pre-rulebase (leger)")
     parser.add_argument("--fw-rules", help="Serial : localise les regles effectives du firewall (pushed pre/post + local)")
     parser.add_argument("--app-info", help="Nom d'application : dump sa definition (ports par defaut)")
-    parser.add_argument("--serial", help="Serial (pour --app-info via target)")
+    parser.add_argument("--serial", help="Serial (pour --app-info/--locate via target)")
+    parser.add_argument("--locate-svc", help="Localise un objet service par nom (ou tous les DG)")
+    parser.add_argument("--dg", help="Nom du device-group (pour --locate-svc)")
     parser.add_argument("--dump", help="nom du device-group a dumper")
     parser.add_argument("--json", dest="json_path", help="sauve le dump complet")
 
@@ -91,6 +93,33 @@ def main():
     if args.find:
         dg = pano.find_device_group(args.find)
         print(f"Device-group de {args.find} : {dg}")
+        return
+
+    if args.locate_svc:
+        name = args.locate_svc
+        dg = args.dg or "cngfw-az-partnerhub"
+        tries = [
+            ("Panorama shared", f"/config/shared/service/entry[@name='{name}']", False),
+            (f"Panorama DG {dg}", f"/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='{dg}']/service/entry[@name='{name}']", False),
+        ]
+        if args.serial:
+            tries += [
+                ("FW shared (target)", f"/config/shared/service/entry[@name='{name}']", True),
+                ("FW pushed vsys (target)", f"/config/panorama/vsys/entry[@name='vsys1']/service/entry[@name='{name}']", True),
+                ("FW local vsys (target)", f"/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/service/entry[@name='{name}']", True),
+            ]
+        for label, xpath, via_target in tries:
+            try:
+                xml = (pano.get_config_target(xpath, args.serial) if via_target
+                       else pano.get_config(xpath))
+            except Exception as e:
+                print(f"  [{label}] erreur: {str(e).splitlines()[0]}")
+                continue
+            has = bool(re.search(r"<entry\b", xml))
+            print(f"  [{label}] {'TROUVE' if has else 'absent'}")
+            if has:
+                m = re.search(r"(<entry\b.*?</entry>)", xml, re.S)
+                print(f"    {m.group(1)[:400] if m else ''}")
         return
 
     if args.app_info:
