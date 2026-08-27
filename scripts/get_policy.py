@@ -63,6 +63,8 @@ def main():
     parser.add_argument("--pushed", help="Serial du firewall : dump la policy poussee en XML (show config pushed-shared-policy)")
     parser.add_argument("--sample-rule", action="store_true", help="Affiche 1 exemple de regle shared pre-rulebase (leger)")
     parser.add_argument("--fw-rules", help="Serial : localise les regles effectives du firewall (pushed pre/post + local)")
+    parser.add_argument("--app-info", help="Nom d'application : dump sa definition (ports par defaut)")
+    parser.add_argument("--serial", help="Serial (pour --app-info via target)")
     parser.add_argument("--dump", help="nom du device-group a dumper")
     parser.add_argument("--json", dest="json_path", help="sauve le dump complet")
 
@@ -89,6 +91,26 @@ def main():
     if args.find:
         dg = pano.find_device_group(args.find)
         print(f"Device-group de {args.find} : {dg}")
+        return
+
+    if args.app_info:
+        name = args.app_info
+        paths = [
+            ("predefined", f"/config/predefined/application/entry[@name='{name}']"),
+            ("shared", f"/config/shared/application/entry[@name='{name}']"),
+        ]
+        for label, xpath in paths:
+            try:
+                xml = (pano.get_config_target(xpath, args.serial) if args.serial
+                       else pano.get_config(xpath))
+            except Exception as e:
+                print(f"  [{label}] erreur: {str(e).splitlines()[0]}")
+                continue
+            if re.search(r"<entry\b", xml):
+                print(f"--- application '{name}' ({label}) ---")
+                print(xml[:2000])
+                return
+        print(f"Application '{name}' introuvable (essaye --serial pour cibler un firewall).")
         return
 
     if args.fw_rules:
