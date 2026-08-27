@@ -91,12 +91,12 @@ class PolicyEngine:
                       if r.get("loc") and r["loc"] not in ("shared", "?")})
         dg_base = "/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='{dg}']"
 
-        # (chemin, via_panorama) : shared/vsys/local via le firewall (target) ;
-        # objets device-group via Panorama (sans target).
-        paths_addr = [("/config/shared/address", False), (VSYS + "/address", False),
+        # (chemin, via_panorama) : le SHARED complet est sur Panorama (la vue du
+        # firewall est partielle) ; vsys/local sur le firewall (target) ; DG sur Panorama.
+        paths_addr = [("/config/shared/address", True), (VSYS + "/address", False),
                       (LOCAL + "/address", False)]
-        paths_grp = [("/config/shared/address-group", False), (VSYS + "/address-group", False)]
-        paths_svc = [("/config/shared/service", False), (VSYS + "/service", False)]
+        paths_grp = [("/config/shared/address-group", True), (VSYS + "/address-group", False)]
+        paths_svc = [("/config/shared/service", True), (VSYS + "/service", False)]
         for dg in dgs:
             paths_addr.append((dg_base.format(dg=dg) + "/address", True))
             paths_grp.append((dg_base.format(dg=dg) + "/address-group", True))
