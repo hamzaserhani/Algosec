@@ -337,9 +337,11 @@ class PolicyEngine:
                 continue
             cats = rule["category"]
             url_cat = bool(cats) and cats != ["any"]
-            pm = "skip(url-cat)" if url_cat else self._port_match(rule, proto, port)
-            hits.append((rule["name"], rule["action"], rule["application"],
-                         rule["service"], pm, rule.get("section")))
+            pm = self._port_match(rule, proto, port)
+            hits.append({"name": rule["name"], "action": rule["action"],
+                         "app": rule["application"], "svc": rule["service"],
+                         "dst": rule["destination"], "cat": rule["category"],
+                         "url_cat": url_cat, "pm": pm})
         return hits
 
     def evaluate(self, src, dst, proto, port, flow_app=None):
@@ -445,8 +447,10 @@ def main():
         proto, port = parse_svc(args.svc)
         if args.trace:
             print(f"\n=== Trace {args.src} -> {args.dst} {proto}/{port} (regles source+dest matchees) ===")
-            for name, action, apps, svc, pm, sec in eng.trace(args.src, args.dst, proto, port):
-                print(f"  [{pm:14}] {action:5} {name}  app={apps} svc={svc}")
+            for h in eng.trace(args.src, args.dst, proto, port):
+                tag = "url-cat" if h["url_cat"] else h["pm"]
+                print(f"  [{tag:10}] {h['action']:5} {h['name']}")
+                print(f"       dst={h['dst']} app={h['app']} svc={h['svc']} cat={h['cat']}")
             print()
         res = eng.evaluate(args.src, args.dst, proto, port, flow_app=args.app)
         print(f"{args.src} -> {args.dst} {proto}/{port}" + (f" app={args.app}" if args.app else ""))
