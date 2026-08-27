@@ -146,9 +146,11 @@ class PolicyEngine:
             xml = self._get(xpath)
             for entry in re.findall(r"<entry\b[^>]*>.*?</entry>", xml, re.S):
                 name = re.search(r'name="([^"]+)"', entry)
+                loc = re.search(r'\bloc="([^"]+)"', entry[:200])
                 self.rules.append({
                     "name": name.group(1) if name else "?",
                     "section": label,
+                    "loc": loc.group(1) if loc else "?",
                     "disabled": (_text(entry, "disabled") or "no").lower() == "yes",
                     "source": _members(entry, "source"),
                     "destination": _members(entry, "destination"),
@@ -324,9 +326,12 @@ def main():
     eng = PolicyEngine(pano, args.serial)
     n = eng.load_firewall_rules()
     by_sec = {}
+    by_loc = {}
     for r in eng.rules:
         by_sec[r["section"]] = by_sec.get(r["section"], 0) + 1
+        by_loc[r.get("loc", "?")] = by_loc.get(r.get("loc", "?"), 0) + 1
     print(f"[OK] {n} regles effectives chargees ({by_sec}).")
+    print(f"     par origine (loc): {by_loc}")
     na, ng, ns = eng.load_objects()
     print(f"[OK] objets charges : {na} adresses, {ng} groupes, {ns} services.")
 
