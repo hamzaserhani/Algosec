@@ -86,9 +86,18 @@ class PolicyEngine:
 
     # --- Chargement en masse des objets (rapide : peu d'appels) ---
     def load_objects(self):
+        # Device-groups references par les regles (leurs objets doivent etre charges)
+        dgs = sorted({r.get("loc") for r in self.rules
+                      if r.get("loc") and r["loc"] not in ("shared", "?")})
+        dg_base = "/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='{dg}']"
+
         paths_addr = ["/config/shared/address", VSYS + "/address", LOCAL + "/address"]
         paths_grp = ["/config/shared/address-group", VSYS + "/address-group"]
         paths_svc = ["/config/shared/service", VSYS + "/service"]
+        for dg in dgs:
+            paths_addr.append(dg_base.format(dg=dg) + "/address")
+            paths_grp.append(dg_base.format(dg=dg) + "/address-group")
+            paths_svc.append(dg_base.format(dg=dg) + "/service")
 
         for p in paths_addr:
             xml = self._get(p)
@@ -210,8 +219,11 @@ class PolicyEngine:
         return self._svc_objs.get(name, [])
 
     def resolve_app_ports(self, app):
-        """Ports par defaut d'une application -> [(proto, lo, hi)] ou None si
-        non port-based (protocol/icmp) ou introuvable."""
+        """Ports par defaut d'une application.
+
+        Retourne : liste [(proto,lo,hi)] si port-based ; "non-port" si l'app existe
+        mais n'a pas de port tcp/udp (icmp, protocol-based) ; None si introuvable.
+        """
         if app in self._app_cache:
             return self._app_cache[app]
         out = []
@@ -224,6 +236,7 @@ class PolicyEngine:
                 xml = ""
             if re.search(r"<entry\b", xml):
                 break
+        found = bool(re.search(r"<entry\b", xml))
         dflt = re.search(r"<default>(.*?)</default>", xml, re.S)
         if dflt:
             for mem in re.findall(r"<member>([^<]+)</member>", dflt.group(1)):
@@ -233,7 +246,12 @@ class PolicyEngine:
                     lo = int(m.group(2))
                     hi = int(m.group(3)) if m.group(3) else lo
                     out.append((proto, lo, hi))
-        result = out if out else None  # None = non port-based / inconnu
+        if out:
+            result = out
+        elif found:
+            result = "non-port"   # app existe mais pas de port tcp/udp (icmp...)
+        else:
+            result = None          # introuvable
         self._app_cache[app] = result
         return result
 
@@ -270,8 +288,10 @@ class PolicyEngine:
                 for app in apps:
                     ranges = self.resolve_app_ports(app)
                     if ranges is None:
-                        uncertain = True
+                        uncertain = True   # app introuvable -> indetermine
                         continue
+                    if ranges == "non-port":
+                        continue           # app non tcp/udp (icmp...) -> pas ce flux
                     for (p, lo, hi) in ranges:
                         if p == proto and lo <= port <= hi:
                             return "yes"
