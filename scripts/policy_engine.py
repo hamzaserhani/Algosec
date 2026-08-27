@@ -296,6 +296,23 @@ class PolicyEngine:
             return (flow_app.lower() in [m.lower() for m in members]), True
         return True, False
 
+    def trace(self, src, dst, proto, port):
+        """Liste toutes les regles dont source+dest matchent, avec le verdict port."""
+        hits = []
+        for rule in self.rules:
+            if rule["disabled"]:
+                continue
+            if not self._addr_match(rule["source"], src):
+                continue
+            if not self._addr_match(rule["destination"], dst):
+                continue
+            cats = rule["category"]
+            url_cat = bool(cats) and cats != ["any"]
+            pm = "skip(url-cat)" if url_cat else self._port_match(rule, proto, port)
+            hits.append((rule["name"], rule["action"], rule["application"],
+                         rule["service"], pm, rule.get("section")))
+        return hits
+
     def evaluate(self, src, dst, proto, port, flow_app=None):
         """Evalue un (src,dst,proto,port[,app]). Retourne dict {status, rule, ...}.
 
@@ -364,6 +381,7 @@ def main():
     parser.add_argument("--dst", help="IP destination")
     parser.add_argument("--svc", help="service tcp/443")
     parser.add_argument("--app", help="App-ID du flux (ex: ssl) - leve l'incertitude sur les regles app-specifiques")
+    parser.add_argument("--trace", action="store_true", help="Liste toutes les regles source+dest qui matchent")
     args = parser.parse_args()
 
     pano = PanoramaClient(args.config)
@@ -382,9 +400,16 @@ def main():
 
     if args.src and args.dst and args.svc:
         proto, port = parse_svc(args.svc)
+        if args.trace:
+            print(f"\n=== Trace {args.src} -> {args.dst} {proto}/{port} (regles source+dest matchees) ===")
+            for name, action, apps, svc, pm, sec in eng.trace(args.src, args.dst, proto, port):
+                print(f"  [{pm:14}] {action:5} {name}  app={apps} svc={svc}")
+            print()
         res = eng.evaluate(args.src, args.dst, proto, port, flow_app=args.app)
-        print(f"\n{args.src} -> {args.dst} {proto}/{port}" + (f" app={args.app}" if args.app else ""))
+        print(f"{args.src} -> {args.dst} {proto}/{port}" + (f" app={args.app}" if args.app else ""))
         print(f"  => {res['status']}  (regle: {res.get('rule')}, section: {res.get('section')})")
+        if res.get("note"):
+            print(f"  note: {res['note']}")
         d = res.get("detail")
         if d:
             print(f"\n  Regle matchee '{d['name']}' :")
