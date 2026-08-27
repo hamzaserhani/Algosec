@@ -349,17 +349,31 @@ class PolicyEngine:
         ne matche que sur port concret ; les regles 'application-default' sont
         ignorees. Fournir flow_app active le mode app-aware.
         """
+        try:
+            dst_internal = ipaddress.ip_address(dst).is_private
+        except ValueError:
+            dst_internal = True
+
         uncertain_before = None  # 1ere regle "uncertain" pertinente (src+dst matchent)
         for rule in self.rules:
             if rule["disabled"]:
                 continue
-            # Regle a categorie URL specifique -> ne s'applique pas a un flux IP
             cats = rule["category"]
-            if cats and cats != ["any"]:
-                continue
+            url_cat = bool(cats) and cats != ["any"]
             if not self._addr_match(rule["source"], src):
                 continue
             if not self._addr_match(rule["destination"], dst):
+                continue
+            # Regle URL-category :
+            #  - dest INTERNE : la categorie ne s'applique pas a une IP privee -> skip
+            #  - dest INTERNET : c'est la regle qui gouverne le web, mais on ne connait
+            #    pas la categorie du domaine -> indetermine (REVIEW).
+            if url_cat:
+                if dst_internal:
+                    continue
+                if self._port_match(rule, proto, port) in ("yes", "uncertain"):
+                    if uncertain_before is None:
+                        uncertain_before = rule
                 continue
 
             # Si l'app du flux est connue, filtrer les regles app-specifiques.
