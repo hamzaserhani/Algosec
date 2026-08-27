@@ -75,6 +75,7 @@ class PolicyEngine:
         self.rules = []          # rulebase effective, dans l'ordre
         self._addr_cache = {}    # name -> list[ip_network] | "any"
         self._svc_cache = {}
+        self._app_cache = {}     # app -> [(proto,lo,hi)] | None
         # Tables d'objets chargees en masse (name -> definition brute)
         self._addr_objs = {}     # name -> ("netmask"|"range", valeur)
         self._grp_objs = {}      # name -> [membres]
@@ -208,6 +209,34 @@ class PolicyEngine:
             return "app-default"
         return self._svc_objs.get(name, [])
 
+    def resolve_app_ports(self, app):
+        """Ports par defaut d'une application -> [(proto, lo, hi)] ou None si
+        non port-based (protocol/icmp) ou introuvable."""
+        if app in self._app_cache:
+            return self._app_cache[app]
+        out = []
+        xml = ""
+        for path in (f"/config/predefined/application/entry[@name='{app}']",
+                     f"/config/shared/application/entry[@name='{app}']"):
+            try:
+                xml = self._get(path)
+            except Exception:
+                xml = ""
+            if re.search(r"<entry\b", xml):
+                break
+        dflt = re.search(r"<default>(.*?)</default>", xml, re.S)
+        if dflt:
+            for mem in re.findall(r"<member>([^<]+)</member>", dflt.group(1)):
+                m = re.match(r"(tcp|udp)/(\d+)(?:-(\d+))?", mem.strip(), re.I)
+                if m:
+                    proto = m.group(1).lower()
+                    lo = int(m.group(2))
+                    hi = int(m.group(3)) if m.group(3) else lo
+                    out.append((proto, lo, hi))
+        result = out if out else None  # None = non port-based / inconnu
+        self._app_cache[app] = result
+        return result
+
     # --- Matching ---
     def _addr_match(self, members, ip):
         addr = ipaddress.ip_address(ip)
@@ -220,26 +249,37 @@ class PolicyEngine:
                     return True
         return False
 
-    def _svc_match(self, members, proto, port, ports_only=True):
-        """Retourne (match, confident) pour le port.
+    def _port_match(self, rule, proto, port):
+        """Le port du flux matche-t-il le service de la regle ?
 
-        - service 'any'            -> match (tout port)
-        - service concret couvrant -> match confiant
-        - 'application-default'     -> en ports-only : NON match (port inconnu sans
-          l'app) ; en mode app-aware : match non confiant.
+        Resout 'application-default' via les ports par defaut des applications de
+        la regle (le port sert de proxy pour l'app). Retourne 'yes' | 'no' |
+        'uncertain' (app-default sur application=any, ou app non port-based).
         """
-        for m in members:
+        apps = rule["application"]
+        app_any = (not apps) or apps == ["any"]
+        uncertain = False
+        for m in rule["service"]:
             r = self.resolve_svc(m)
             if r == "any":
-                return True, True
+                return "yes"
             if r == "app-default":
-                if ports_only:
-                    continue  # port indeterminable -> cette regle ne matche pas
-                return True, False
-            for (p, lo, hi) in r:
+                if app_any:
+                    uncertain = True  # port par defaut de "n'importe quelle app" -> indetermine
+                    continue
+                for app in apps:
+                    ranges = self.resolve_app_ports(app)
+                    if ranges is None:
+                        uncertain = True
+                        continue
+                    for (p, lo, hi) in ranges:
+                        if p == proto and lo <= port <= hi:
+                            return "yes"
+                continue
+            for (p, lo, hi) in r:  # service concret
                 if p == proto and lo <= port <= hi:
-                    return True, True
-        return False, True
+                    return "yes"
+        return "uncertain" if uncertain else "no"
 
     @staticmethod
     def _app_match(members, flow_app):
@@ -263,8 +303,7 @@ class PolicyEngine:
         ne matche que sur port concret ; les regles 'application-default' sont
         ignorees. Fournir flow_app active le mode app-aware.
         """
-        ports_only = flow_app is None
-        uncertain_before = None  # 1ere regle app-specifique/app-default sautee mais pertinente
+        uncertain_before = None  # 1ere regle "uncertain" pertinente (src+dst matchent)
         for rule in self.rules:
             if rule["disabled"]:
                 continue
@@ -277,51 +316,36 @@ class PolicyEngine:
             if not self._addr_match(rule["destination"], dst):
                 continue
 
+            # Si l'app du flux est connue, filtrer les regles app-specifiques.
             apps = rule["application"]
             app_specific = bool(apps) and apps != ["any"]
+            if flow_app and app_specific:
+                if flow_app.lower() not in [a.lower() for a in apps]:
+                    continue  # la regle ne concerne pas cette app
 
-            if not ports_only:
-                app_ok, app_confident = self._app_match(apps, flow_app)
-                if not app_ok:
-                    continue
-                svc_ok, svc_confident = self._svc_match(rule["service"], proto, port, ports_only=False)
-                if not svc_ok:
-                    continue
-                confident = app_confident and svc_confident
-            else:
-                # Mode ports-only : une regle est pleinement evaluable seulement
-                # si application=any ET service concret/any couvrant le port.
-                svc_ok, _ = self._svc_match(rule["service"], proto, port, ports_only=True)
-                port_indetermine = ("application-default" in [s.lower() for s in rule["service"]])
-                if app_specific or port_indetermine:
-                    # Regle pertinente (src+dst matchent) mais non evaluable sans
-                    # l'app -> elle pourrait etre la vraie decideuse. On note et on
-                    # continue (ne pas conclure BLOCKED a tort ensuite).
-                    if svc_ok or port_indetermine:
-                        if uncertain_before is None:
-                            uncertain_before = rule
-                    continue
-                if not svc_ok:
-                    continue
-                confident = True
+            pm = self._port_match(rule, proto, port)
+            if pm == "no":
+                continue
+            if pm == "uncertain":
+                if uncertain_before is None:
+                    uncertain_before = rule
+                continue
 
+            # pm == "yes" : la regle s'applique au flux
             action = rule["action"]
-            status = ("ALLOWED" if action == "allow" else "BLOCKED")
-            if not confident:
-                status = "REVIEW"
-            # Une regle app-specifique/app-default pertinente a ete sautee avant ->
-            # elle pourrait changer le verdict -> on ne peut pas affirmer -> REVIEW.
-            if uncertain_before is not None and status != "REVIEW":
+            status = "ALLOWED" if action == "allow" else "BLOCKED"
+            # Une regle 'uncertain' pertinente sautee avant pourrait etre la vraie
+            # decideuse -> on ne peut pas affirmer -> REVIEW.
+            if uncertain_before is not None:
                 return {"status": "REVIEW", "rule": rule["name"], "action": action,
                         "confident": False, "section": rule.get("section"), "detail": rule,
-                        "note": f"regle app-specifique sautee avant: {uncertain_before['name']}"}
+                        "note": f"regle indeterminee avant: {uncertain_before['name']}"}
             return {"status": status, "rule": rule["name"], "action": action,
-                    "confident": confident, "section": rule.get("section"),
+                    "confident": True, "section": rule.get("section"),
                     "detail": rule, "app_specific": app_specific}
         if uncertain_before is not None:
             return {"status": "REVIEW", "rule": uncertain_before["name"], "section": None,
-                    "detail": uncertain_before,
-                    "note": "seules des regles app-specifiques matchent (app requise)"}
+                    "detail": uncertain_before, "note": "regle indeterminee (app-default sur app=any)"}
         return {"status": "NO_MATCH", "rule": None, "section": None}
 
 
