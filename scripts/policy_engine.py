@@ -264,6 +264,7 @@ class PolicyEngine:
         ignorees. Fournir flow_app active le mode app-aware.
         """
         ports_only = flow_app is None
+        uncertain_before = None  # 1ere regle app-specifique/app-default sautee mais pertinente
         for rule in self.rules:
             if rule["disabled"]:
                 continue
@@ -275,32 +276,52 @@ class PolicyEngine:
                 continue
             if not self._addr_match(rule["destination"], dst):
                 continue
-            # Application
+
             apps = rule["application"]
-            if ports_only:
-                # On ne peut pas evaluer une regle app-specifique sans l'app du
-                # flux -> on la SAUTE (evite les faux match type block-teamviewer,
-                # block-ms-quick-assist). Seules les regles 'application any'
-                # donnent un verdict port-based.
-                if apps and apps != ["any"]:
-                    continue
-                app_confident = True
-            else:
+            app_specific = bool(apps) and apps != ["any"]
+
+            if not ports_only:
                 app_ok, app_confident = self._app_match(apps, flow_app)
                 if not app_ok:
                     continue
-            svc_ok, svc_confident = self._svc_match(rule["service"], proto, port, ports_only)
-            if not svc_ok:
-                continue
+                svc_ok, svc_confident = self._svc_match(rule["service"], proto, port, ports_only=False)
+                if not svc_ok:
+                    continue
+                confident = app_confident and svc_confident
+            else:
+                # Mode ports-only : une regle est pleinement evaluable seulement
+                # si application=any ET service concret/any couvrant le port.
+                svc_ok, _ = self._svc_match(rule["service"], proto, port, ports_only=True)
+                port_indetermine = ("application-default" in [s.lower() for s in rule["service"]])
+                if app_specific or port_indetermine:
+                    # Regle pertinente (src+dst matchent) mais non evaluable sans
+                    # l'app -> elle pourrait etre la vraie decideuse. On note et on
+                    # continue (ne pas conclure BLOCKED a tort ensuite).
+                    if svc_ok or port_indetermine:
+                        if uncertain_before is None:
+                            uncertain_before = rule
+                    continue
+                if not svc_ok:
+                    continue
+                confident = True
+
             action = rule["action"]
-            confident = app_confident and svc_confident
             status = ("ALLOWED" if action == "allow" else "BLOCKED")
             if not confident:
                 status = "REVIEW"
+            # Une regle app-specifique/app-default pertinente a ete sautee avant ->
+            # elle pourrait changer le verdict -> on ne peut pas affirmer -> REVIEW.
+            if uncertain_before is not None and status != "REVIEW":
+                return {"status": "REVIEW", "rule": rule["name"], "action": action,
+                        "confident": False, "section": rule.get("section"), "detail": rule,
+                        "note": f"regle app-specifique sautee avant: {uncertain_before['name']}"}
             return {"status": status, "rule": rule["name"], "action": action,
                     "confident": confident, "section": rule.get("section"),
-                    "detail": rule,
-                    "app_specific": not (not rule["application"] or rule["application"] == ["any"])}
+                    "detail": rule, "app_specific": app_specific}
+        if uncertain_before is not None:
+            return {"status": "REVIEW", "rule": uncertain_before["name"], "section": None,
+                    "detail": uncertain_before,
+                    "note": "seules des regles app-specifiques matchent (app requise)"}
         return {"status": "NO_MATCH", "rule": None, "section": None}
 
 
