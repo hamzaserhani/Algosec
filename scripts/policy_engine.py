@@ -406,8 +406,13 @@ class PolicyEngine:
                     "confident": True, "section": rule.get("section"),
                     "detail": rule, "app_specific": app_specific}
         if uncertain_before is not None:
+            if not dst_internal:
+                note = ("flux INTERNET gouverne par filtrage URL (categorie du domaine "
+                        "inconnue) - non evaluable par la policy, se fier aux LOGS")
+            else:
+                note = "regle indeterminee (app-default sur app=any)"
             return {"status": "REVIEW", "rule": uncertain_before["name"], "section": None,
-                    "detail": uncertain_before, "note": "regle indeterminee (app-default sur app=any)"}
+                    "detail": uncertain_before, "note": note}
         return {"status": "NO_MATCH", "rule": None, "section": None}
 
 
