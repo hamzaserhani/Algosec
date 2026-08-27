@@ -25,6 +25,17 @@
             "user": "SX41-GBL-USR-APP"
         }
     },
+    "_comment_panorama": "Acces Panorama pour le pre-check (logs + policy).",
+    "panorama": {
+        "server": "https://your-panorama",
+        "api_key": "...",
+        "verify_ssl": false
+    },
+    "_comment_policy_firewalls": "Firewalls a evaluer par le moteur policy (informatif). name=libelle, serial=numero de serie.",
+    "policy_firewalls": [
+        {"name": "pazcweufwp01", "serial": "1600UD8LGE4IBMP"},
+        {"name": "GDCFWBCKN001", "serial": "019909000914"}
+    ],
     "reporting": {
         "templates": [
             "Mon Template Custom 1",
