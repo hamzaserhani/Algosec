@@ -108,7 +108,14 @@ def main():
                 continue
             if re.search(r"<entry\b", xml):
                 print(f"--- application '{name}' ({label}) ---")
-                print(xml[:2000])
+                # Extrait uniquement la partie ports/default (la description est enorme)
+                dflt = re.search(r"<default>.*?</default>", xml, re.S)
+                print("bloc <default> :")
+                print(dflt.group(0)[:1500] if dflt else "  (pas de bloc <default>)")
+                ports = re.findall(r"<member>([^<]*(?:tcp|udp)[^<]*)</member>", xml, re.I)
+                proto = re.findall(r"<(?:ident-by-ip-protocol|protocol)>([^<]+)</(?:ident-by-ip-protocol|protocol)>", xml, re.I)
+                print(f"ports (member tcp/udp) : {ports}")
+                print(f"ident-by-protocol      : {proto}")
                 return
         print(f"Application '{name}' introuvable (essaye --serial pour cibler un firewall).")
         return
