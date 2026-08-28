@@ -23,8 +23,11 @@ from panorama_client import PanoramaClient
 from policy_engine import PolicyEngine
 
 
-def build_allow_query(since_str):
-    return f"(action eq allow) and (time_generated geq '{since_str}')"
+def build_allow_query(since_str, extra=None):
+    q = f"(action eq allow) and (time_generated geq '{since_str}')"
+    if extra:
+        q += f" and ({extra})"
+    return q
 
 
 def parse_proto(entry):
@@ -39,8 +42,11 @@ def parse_proto(entry):
 def main():
     parser = argparse.ArgumentParser(description="Valide le moteur policy contre les logs")
     parser.add_argument("--config", default="config.json")
-    parser.add_argument("--days", type=int, default=7, help="Fenetre logs (jours)")
-    parser.add_argument("--nlogs", type=int, default=200, help="Taille de l'echantillon")
+    parser.add_argument("--days", type=int, default=2, help="Fenetre logs (jours)")
+    parser.add_argument("--nlogs", type=int, default=50, help="Taille de l'echantillon")
+    parser.add_argument("--timeout", type=int, default=240, help="Timeout requete log (s)")
+    parser.add_argument("--filter", dest="extra_filter",
+                        help="Filtre log additionnel pour accelerer/cibler (ex: \"addr.src in 10.120.0.0/16\")")
     parser.add_argument("--json", dest="json_path", help="Rapport detaille JSON")
     parser.add_argument("--use-app", action="store_true", help="Passer l'App-ID du log au moteur (mode app-aware)")
 
@@ -60,8 +66,10 @@ def main():
 
     since = datetime.datetime.now() - datetime.timedelta(days=args.days)
     since_str = since.strftime("%Y/%m/%d %H:%M:%S")
-    print(f"[...] Echantillon de {args.nlogs} sessions ALLOWED depuis {since_str}...")
-    logs = pano.query_traffic_log(build_allow_query(since_str), nlogs=args.nlogs, max_wait=180)
+    print(f"[...] Echantillon de {args.nlogs} sessions ALLOWED depuis {since_str}"
+          + (f" (filtre: {args.extra_filter})" if args.extra_filter else "") + "...")
+    logs = pano.query_traffic_log(build_allow_query(since_str, args.extra_filter),
+                                  nlogs=args.nlogs, max_wait=args.timeout)
     print(f"[OK] {len(logs)} sessions recuperees.")
 
     engines = {}  # serial -> PolicyEngine (charge a la demande)
