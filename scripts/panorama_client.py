@@ -192,7 +192,8 @@ class PanoramaClient:
             entries.append({
                 "action": g("action"), "src": g("src"), "dst": g("dst"),
                 "dport": g("dport"), "rule": g("rule"), "time": g("time_generated"),
-                "app": g("app"),
+                "app": g("app"), "proto": g("proto"),
+                "device_name": g("device_name"), "serial": g("serial"),
             })
         return entries
 
