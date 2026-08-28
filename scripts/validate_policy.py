@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import datetime
+import ipaddress
 import json
 
 from panorama_client import PanoramaClient
@@ -84,7 +85,7 @@ def main():
         return engines[serial]
 
     stats = {"total": 0, "ok_allowed": 0, "same_rule": 0, "not_allowed": 0,
-             "skipped_no_fw": 0, "skipped_no_proto": 0}
+             "skipped_no_fw": 0, "skipped_no_proto": 0, "internet": 0}
     discrepancies = []
 
     for e in logs:
@@ -92,6 +93,14 @@ def main():
         if not proto or not e.get("dport") or not e.get("src") or not e.get("dst"):
             stats["skipped_no_proto"] += 1
             continue
+        # Flux INTERNET (dest publique) : gouvernes par filtrage URL -> hors perimetre
+        # du moteur policy (les logs les couvrent). On les exclut du taux.
+        try:
+            if not ipaddress.ip_address(e["dst"]).is_private:
+                stats["internet"] += 1
+                continue
+        except ValueError:
+            pass
         # Trouve le firewall qui a logge (serial ou device_name -> serial configure)
         serial = e.get("serial")
         if serial not in fw_by_serial:
@@ -123,7 +132,8 @@ def main():
             })
 
     print(f"\n{'='*50}")
-    print(f"Sessions evaluees        : {stats['total']}")
+    print(f"Flux internet exclus     : {stats['internet']} (filtrage URL -> geres par logs)")
+    print(f"Sessions INTERNES evaluees: {stats['total']}")
     print(f"  moteur = ALLOWED       : {stats['ok_allowed']}"
           + (f"  (dont meme regle: {stats['same_rule']})" if stats['ok_allowed'] else ""))
     print(f"  moteur != ALLOWED      : {stats['not_allowed']}  <-- ecarts a diagnostiquer")
