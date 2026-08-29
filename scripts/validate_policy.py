@@ -45,7 +45,7 @@ def main():
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--days", type=int, default=2, help="Fenetre logs (jours)")
     parser.add_argument("--nlogs", type=int, default=50, help="Taille de l'echantillon")
-    parser.add_argument("--timeout", type=int, default=240, help="Timeout requete log (s)")
+    parser.add_argument("--timeout", type=int, default=400, help="Timeout requete log (s)")
     parser.add_argument("--filter", dest="extra_filter",
                         help="Filtre log additionnel pour accelerer/cibler (ex: \"addr.src in 10.120.0.0/16\")")
     parser.add_argument("--json", dest="json_path", help="Rapport detaille JSON")
