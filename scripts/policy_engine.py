@@ -276,12 +276,15 @@ class PolicyEngine:
                     return True
         return False
 
-    def _port_match(self, rule, proto, port):
+    def _port_match(self, rule, proto, port, flow_app=None):
         """Le port du flux matche-t-il le service de la regle ?
 
-        Resout 'application-default' via les ports par defaut des applications de
-        la regle (le port sert de proxy pour l'app). Retourne 'yes' | 'no' |
-        'uncertain' (app-default sur application=any, ou app non port-based).
+        Resout 'application-default' via les ports par defaut des applications :
+        - regle app-specifique  -> ports par defaut des apps de la regle
+        - regle app=any + flow_app connu -> ports par defaut de l'app du flux
+          (une regle 'any/app-default' autorise chaque app sur son port defaut)
+        - regle app=any + flow_app inconnu -> indetermine (uncertain)
+        Retourne 'yes' | 'no' | 'uncertain'.
         """
         apps = rule["application"]
         app_any = (not apps) or apps == ["any"]
@@ -291,10 +294,11 @@ class PolicyEngine:
             if r == "any":
                 return "yes"
             if r == "app-default":
-                if app_any:
-                    uncertain = True  # port par defaut de "n'importe quelle app" -> indetermine
+                check_apps = ([flow_app] if flow_app else None) if app_any else apps
+                if check_apps is None:
+                    uncertain = True  # app du flux inconnue -> port defaut indetermine
                     continue
-                for app in apps:
+                for app in check_apps:
                     ranges = self.resolve_app_ports(app)
                     if ranges is None:
                         uncertain = True   # app introuvable -> indetermine
@@ -373,7 +377,7 @@ class PolicyEngine:
             if url_cat:
                 if dst_internal:
                     continue
-                if self._port_match(rule, proto, port) in ("yes", "uncertain"):
+                if self._port_match(rule, proto, port, flow_app) in ("yes", "uncertain"):
                     if uncertain_before is None:
                         uncertain_before = rule
                 continue
@@ -385,7 +389,7 @@ class PolicyEngine:
                 if flow_app.lower() not in [a.lower() for a in apps]:
                     continue  # la regle ne concerne pas cette app
 
-            pm = self._port_match(rule, proto, port)
+            pm = self._port_match(rule, proto, port, flow_app)
             if pm == "no":
                 continue
             if pm == "uncertain":
