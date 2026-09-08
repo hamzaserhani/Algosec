@@ -24,45 +24,10 @@ import argparse
 import csv
 import json
 import re
-from urllib.parse import quote
 
-import requests
-import urllib3
+from panorama_client import PanoramaClient
 
 DEV = "localhost.localdomain"
-
-
-def load_panorama_cfg(config_path):
-    with open(config_path, "r") as f:
-        cfg = json.load(f).get("panorama") or {}
-    if not cfg.get("server"):
-        raise Exception("Config 'panorama.server' manquante dans config.json")
-    return cfg
-
-
-def keygen(session, server, user, password):
-    """Genere la cle API (params encodes par requests)."""
-    r = session.get(f"{server}/api/", params={"type": "keygen", "user": user, "password": password})
-    r.raise_for_status()
-    m = re.search(r"<key>(.*?)</key>", r.text, re.S)
-    if not m:
-        raise Exception(f"Keygen echoue: {r.text[:300]}")
-    return m.group(1).strip()
-
-
-def config_get(session, server, api_key, xpath, header_key=False):
-    """config action=get. Cle via params (encodee) ou header X-PAN-KEY."""
-    params = {"type": "config", "action": "get", "xpath": xpath}
-    headers = {}
-    if header_key:
-        headers["X-PAN-KEY"] = api_key
-    else:
-        params["key"] = api_key
-    r = session.get(f"{server}/api/", params=params, headers=headers)
-    r.raise_for_status()
-    if "status=\"error\"" in r.text or "status = 'error'" in r.text:
-        raise Exception(f"Erreur API: {r.text[:300]}")
-    return r.text
 
 
 def parse_addresses(xml):
@@ -117,31 +82,23 @@ def main():
     parser.add_argument("--dg", help="Nom du device-group (sinon shared)")
     parser.add_argument("--csv", dest="csv_path", help="Export CSV des objets adresses")
     parser.add_argument("--json", dest="json_path", help="Export JSON complet (adresses + groupes)")
-    parser.add_argument("--header-key", action="store_true", help="Envoyer la cle en header X-PAN-KEY")
     parser.add_argument("--limit", type=int, help="N'afficher que les N premiers (aperçu)")
     args = parser.parse_args()
 
-    cfg = load_panorama_cfg(args.config)
-    server = cfg["server"].rstrip("/")
-    session = requests.Session()
-    session.verify = cfg.get("verify_ssl", True)
-    if not session.verify:
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    api_key = cfg.get("api_key")
-    if not api_key:
-        api_key = keygen(session, server, quote(str(cfg["username"])), quote(str(cfg["password"])))
-        print("[OK] Cle API obtenue.")
+    # Reutilise le client eprouve (meme keygen/get que check_flows -> pas de
+    # double encodage de la cle, cause du 'Invalid Credential' en reimplementant).
+    pano = PanoramaClient(args.config)
+    pano.keygen()
 
     xp_addr, xp_grp = xpaths(args.dg)
     scope = f"device-group '{args.dg}'" if args.dg else "shared"
 
     print(f"[...] GET objets adresses ({scope})...")
-    addr = parse_addresses(config_get(session, server, api_key, xp_addr, args.header_key))
+    addr = parse_addresses(pano.get_config(xp_addr))
     print(f"[OK] {len(addr)} objet(s) adresse.")
 
     print(f"[...] GET groupes d'adresses ({scope})...")
-    grp = parse_groups(config_get(session, server, api_key, xp_grp, args.header_key))
+    grp = parse_groups(pano.get_config(xp_grp))
     print(f"[OK] {len(grp)} groupe(s).")
 
     # Apercu console
