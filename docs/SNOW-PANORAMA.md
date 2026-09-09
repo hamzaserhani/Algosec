@@ -1,87 +1,99 @@
-# Intégration ServiceNow → Panorama (PAN-OS XML API)
+# ServiceNow → Panorama Integration (PAN-OS XML API)
 
-Documentation de référence pour récupérer depuis ServiceNow les **objets
-adresses** et **groupes d'adresses** de Panorama, via l'API XML PAN-OS.
+Reference documentation to retrieve **address objects** and **address groups**
+from Panorama via the PAN-OS XML API, from ServiceNow.
 
-Basée sur le script validé `scripts/get_panorama_objects.py`.
+Based on the validated script `scripts/get_panorama_objects.py`.
 
 ---
 
-## 0. Principes de base (À LIRE EN PREMIER)
+## Environments
 
-| Point | Détail |
-|-------|--------|
-| **Protocole** | API XML PAN-OS (réponses en **XML**, pas JSON) |
-| **Base URL** | `https://<panorama>/api/` — ⚠️ garder le **`/` final** avant `?` |
-| **Méthode** | `GET` (les paramètres passent en query string ; pas de body) |
-| **Auth** | par **clé API** (générée une fois), PAS de cookie de session |
-| **Réseau** | Panorama est en IP interne → depuis ServiceNow cloud, passer par un **MID Server** |
-| **SSL** | certificat interne → importer le certif dans le keystore, ou MID Server qui l'accepte |
+| Environment | Base URL |
+|-------------|----------|
+| **Production** | `https://gdcpamgmt002.dir.ucb-group.com/` |
+| **Development** | `https://10.15.95.100/` |
 
-### ⚠️ Les 2 pièges qui causent 99% des erreurs
+> All API calls use the base path `<Base URL>api/` — **keep the trailing `/`
+> before `?`** (e.g. `.../api/?type=...`).
+
+---
+
+## 0. Fundamentals (READ FIRST)
+
+| Item | Detail |
+|------|--------|
+| **Protocol** | PAN-OS XML API (responses are **XML**, not JSON) |
+| **Base URL** | `https://<panorama>/api/` |
+| **Method** | `GET` (parameters go in the query string; no body) |
+| **Authentication** | **API key** (generated once), NO session cookie |
+| **Network** | Panorama is on an internal IP → from ServiceNow cloud, route through a **MID Server** |
+| **TLS/SSL** | internal certificate → import it into the keystore, or use a MID Server that trusts it |
+
+### ⚠️ The 2 pitfalls that cause 99% of errors
 
 1. **`400 Missing value for parameter "type"`**
-   → les paramètres n'arrivent pas à Panorama. Mettre **tous les params dans
-   l'URL** (`/api/?type=...&...`), ou utiliser un POST form-urlencoded.
-   Encoder le mot de passe s'il contient des caractères spéciaux (`&`, `#`, `+`…).
+   → parameters are not reaching Panorama. Put **all parameters in the URL**
+   (`/api/?type=...&...`), or use a POST form-urlencoded request.
+   URL-encode the password if it contains special characters (`&`, `#`, `+`, …).
 
-2. **`403 Invalid Credential` alors que la clé semble bonne**
-   → la **clé API est mal transmise**. Les clés PAN-OS contiennent `+`, `/`, `=`
-   qui sont **corrompus en query string** (`+` devient espace).
-   **Solution : passer la clé dans le header `X-PAN-KEY`** (aucun encodage requis),
-   OU l'URL-encoder (`+`→`%2B`, `/`→`%2F`, `=`→`%3D`).
-   Ne JAMAIS double-encoder (pas de `quote()` puis ré-encodage).
+2. **`403 Invalid Credential` even though the key looks correct**
+   → the **API key is being transmitted incorrectly**. PAN-OS keys contain
+   `+`, `/`, `=` which get **corrupted in a query string** (`+` becomes a space).
+   **Fix: send the key in the `X-PAN-KEY` header** (no encoding needed),
+   OR URL-encode it (`+`→`%2B`, `/`→`%2F`, `=`→`%3D`).
+   NEVER double-encode (do not `quote()` then let the HTTP client re-encode).
 
 ---
 
-## 1. Générer la clé API (une fois, ou à rafraîchir)
+## 1. Generate the API key (once, or to refresh)
 
 | | |
 |---|---|
 | **Method** | `GET` |
 | **Endpoint** | `https://<panorama>/api/` |
 | **Query params** | `type=keygen` · `user=<user>` · `password=<password>` |
-| **Headers** | *(aucun)* |
-| **Body** | *(aucun)* |
+| **Headers** | *(none)* |
+| **Body** | *(none)* |
 
-**URL complète :**
+**Full URL (Prod):**
 ```
-https://gdcpamgmt002.dir.ucb-group.com/api/?type=keygen&user=apisnow&password=<MDP_ENCODE>
+https://gdcpamgmt002.dir.ucb-group.com/api/?type=keygen&user=apisnow&password=<ENCODED_PASSWORD>
 ```
 
-> Si le mot de passe a des caractères spéciaux : l'encoder, OU préférer un **POST**
-> form-urlencoded :
+> If the password contains special characters, URL-encode it, OR prefer a **POST**
+> form-urlencoded request:
 > ```
 > POST https://<panorama>/api/
 > Content-Type: application/x-www-form-urlencoded
-> Body: type=keygen&user=apisnow&password=<MDP>
+> Body: type=keygen&user=apisnow&password=<PASSWORD>
 > ```
 
-**Réponse (XML) :**
+**Response (XML):**
 ```xml
 <response status="success"><result><key>LUFRPT1xxxx...==</key></result></response>
 ```
-→ extraire **uniquement** le contenu entre `<key>` et `</key>`, et `trim()`
-(pas les balises, pas d'espace/retour-ligne).
+→ extract **only** the content between `<key>` and `</key>`, and `trim()` it
+(no tags, no leading/trailing whitespace or newline).
 
 ---
 
-## 2. Récupérer les OBJETS ADRESSES
+## 2. Retrieve ADDRESS OBJECTS
 
 | | |
 |---|---|
 | **Method** | `GET` |
 | **Endpoint** | `https://<panorama>/api/` |
 | **Query params** | `type=config` · `action=get` · `xpath=/config/shared/address` |
-| **Header** | `X-PAN-KEY: <clé API>` ← **recommandé** (évite le 403) |
-| **Body** | *(aucun)* |
+| **Header** | `X-PAN-KEY: <api key>` ← **recommended** (prevents the 403) |
+| **Body** | *(none)* |
 
-**URL complète (clé en header) :**
+**Full URL (Prod):**
 ```
 https://gdcpamgmt002.dir.ucb-group.com/api/?type=config&action=get&xpath=/config/shared/address
 ```
 
-**Réponse (XML) :**
+**Response (XML):**
 ```xml
 <response status="success"><result>
   <address>
@@ -92,30 +104,30 @@ https://gdcpamgmt002.dir.ucb-group.com/api/?type=config&action=get&xpath=/config
 </result></response>
 ```
 
-**Mapping des champs :**
-| Balise | Sens |
-|--------|------|
-| `entry name="..."` | nom de l'objet |
-| `<ip-netmask>` | IP ou sous-réseau (ex. `10.1.0.0/16`) |
-| `<ip-range>` | plage (ex. `10.1.1.1-10.1.1.5`) |
-| `<fqdn>` | nom DNS (ex. `server.ucb.com`) |
+**Field mapping:**
+| Tag | Meaning |
+|-----|---------|
+| `entry name="..."` | object name |
+| `<ip-netmask>` | IP or subnet (e.g. `10.1.0.0/16`) |
+| `<ip-range>` | range (e.g. `10.1.1.1-10.1.1.5`) |
+| `<fqdn>` | DNS name (e.g. `server.ucb.com`) |
 
-> ⚠️ `/config/shared/address` est **volumineux** (~28994 objets) → grosse
-> réponse XML, un seul appel. Prévoir un timeout large côté ServiceNow.
+> ⚠️ `/config/shared/address` is **large** (~28,994 objects) → big XML response,
+> single call. Use a generous timeout on the ServiceNow side.
 
 ---
 
-## 3. Récupérer les GROUPES D'ADRESSES
+## 3. Retrieve ADDRESS GROUPS
 
 | | |
 |---|---|
 | **Method** | `GET` |
 | **Endpoint** | `https://<panorama>/api/` |
 | **Query params** | `type=config` · `action=get` · `xpath=/config/shared/address-group` |
-| **Header** | `X-PAN-KEY: <clé API>` |
-| **Body** | *(aucun)* |
+| **Header** | `X-PAN-KEY: <api key>` |
+| **Body** | *(none)* |
 
-**Réponse (XML) :**
+**Response (XML):**
 ```xml
 <response status="success"><result>
   <address-group>
@@ -132,48 +144,49 @@ https://gdcpamgmt002.dir.ucb-group.com/api/?type=config&action=get&xpath=/config
 </result></response>
 ```
 
-**Mapping :**
-| Balise | Sens |
-|--------|------|
-| `<static><member>` | groupe **statique** : liste des objets membres |
-| `<dynamic><filter>` | groupe **dynamique** : filtre par tags (pas de membres fixes) |
+**Mapping:**
+| Tag | Meaning |
+|-----|---------|
+| `<static><member>` | **static** group: list of member objects |
+| `<dynamic><filter>` | **dynamic** group: tag-based filter (no fixed members) |
 
 ---
 
-## 4. Variantes utiles
+## 4. Useful variants
 
-**Objets d'un DEVICE-GROUP (au lieu du shared) :**
+**Objects of a DEVICE-GROUP (instead of shared):**
 ```
-xpath=/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='<NOM_DG>']/address
-xpath=/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='<NOM_DG>']/address-group
+xpath=/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='<DG_NAME>']/address
+xpath=/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='<DG_NAME>']/address-group
 ```
 
-**Un objet / groupe PRÉCIS par nom :**
+**A SINGLE object / group by name:**
 ```
 xpath=/config/shared/address/entry[@name='net-10.1.0.0_16']
 xpath=/config/shared/address-group/entry[@name='GRP-SAP-RISE']
 ```
 
-> 💡 Le **shared complet** est sur Panorama (ne pas mettre `target`). Ajouter
-> `&target=<serial>` donne la vue partielle d'un firewall.
+> 💡 The **full shared config** lives on Panorama (do NOT add `target`). Adding
+> `&target=<serial>` returns the partial view of a single firewall.
 
 ---
 
-## 5. Récapitulatif des appels
+## 5. Call summary
 
-| # | But | Method | Query params | Header clé |
-|---|-----|--------|--------------|------------|
-| 1 | Clé API | GET | `type=keygen&user=&password=` | — |
-| 2 | Objets adresses | GET | `type=config&action=get&xpath=/config/shared/address` | `X-PAN-KEY` |
-| 3 | Groupes | GET | `type=config&action=get&xpath=/config/shared/address-group` | `X-PAN-KEY` |
+| # | Purpose | Method | Query params | Key header |
+|---|---------|--------|--------------|------------|
+| 1 | API key | GET | `type=keygen&user=&password=` | — |
+| 2 | Address objects | GET | `type=config&action=get&xpath=/config/shared/address` | `X-PAN-KEY` |
+| 3 | Address groups | GET | `type=config&action=get&xpath=/config/shared/address-group` | `X-PAN-KEY` |
 
 ---
 
-## 6. Exemple ServiceNow (RESTMessageV2)
+## 6. ServiceNow example (RESTMessageV2)
 
 ```javascript
+// Production base URL (Dev: https://10.15.95.100/api/)
 var BASE = 'https://gdcpamgmt002.dir.ucb-group.com/api/';
-var MID  = 'nom_de_ton_mid_server';   // Panorama est en IP interne
+var MID  = 'your_mid_server';   // Panorama is on an internal IP
 
 // --- 1. KEYGEN ---
 var kg = new sn_ws.RESTMessageV2();
@@ -181,65 +194,65 @@ kg.setEndpoint(BASE + '?type=keygen&user=apisnow&password=' + encodeURIComponent
 kg.setHttpMethod('GET');
 kg.setMIDServer(MID);
 var kgResp = kg.execute();
-var apiKey = kgResp.getBody().match(/<key>(.*?)<\/key>/)[1].trim();   // clé nettoyée
+var apiKey = kgResp.getBody().match(/<key>(.*?)<\/key>/)[1].trim();   // cleaned key
 
-// --- 2. OBJETS ADRESSES ---
+// --- 2. ADDRESS OBJECTS ---
 var rm = new sn_ws.RESTMessageV2();
 rm.setEndpoint(BASE + '?type=config&action=get&xpath=' +
                encodeURIComponent('/config/shared/address'));
 rm.setHttpMethod('GET');
 rm.setMIDServer(MID);
-rm.setRequestHeader('X-PAN-KEY', apiKey);      // clé en header -> pas de 403
+rm.setRequestHeader('X-PAN-KEY', apiKey);      // key in header -> no 403
 var resp = rm.execute();
 gs.info(resp.getStatusCode());
 gs.info(resp.getBody());                        // XML <address>...</address>
 
-// --- 3. GROUPES (meme principe) ---
+// --- 3. ADDRESS GROUPS (same pattern) ---
 // xpath = '/config/shared/address-group'
 ```
 
-**Points clés du script :**
-- `encodeURIComponent` sur le **password** (keygen) et sur le **xpath** (contient des `/` et `[]`).
-- clé API en **header `X-PAN-KEY`** (jamais dans l'URL sans encodage).
-- `setMIDServer` car Panorama est en IP interne.
-- clé **trim()** après extraction (pas d'espace/balise).
+**Key points:**
+- `encodeURIComponent` on the **password** (keygen) and on the **xpath** (it contains `/` and `[]`).
+- API key in the **`X-PAN-KEY` header** (never in the URL without encoding).
+- `setMIDServer` because Panorama is on an internal IP.
+- `trim()` the key after extraction (no whitespace/tags).
 
 ---
 
-## 7. Équivalent curl (pour tester/débugger)
+## 7. curl equivalent (for testing/debugging)
 
 ```bash
-# 1. clé
-curl -k "https://gdcpamgmt002.dir.ucb-group.com/api/?type=keygen&user=apisnow&password=MDP"
+# 1. key
+curl -k "https://gdcpamgmt002.dir.ucb-group.com/api/?type=keygen&user=apisnow&password=PASSWORD"
 
-# 2. objets adresses (clé en header)
-curl -k -H "X-PAN-KEY: LA_CLE" \
+# 2. address objects (key in header)
+curl -k -H "X-PAN-KEY: THE_KEY" \
   "https://gdcpamgmt002.dir.ucb-group.com/api/?type=config&action=get&xpath=/config/shared/address"
 
-# 3. groupes
-curl -k -H "X-PAN-KEY: LA_CLE" \
+# 3. groups
+curl -k -H "X-PAN-KEY: THE_KEY" \
   "https://gdcpamgmt002.dir.ucb-group.com/api/?type=config&action=get&xpath=/config/shared/address-group"
 ```
 
 ---
 
-## 8. Dépannage (erreurs rencontrées)
+## 8. Troubleshooting (errors encountered)
 
-| Erreur | Cause | Solution |
-|--------|-------|----------|
-| `400 Missing value for parameter "type"` | params pas transmis | tout dans l'URL, ou POST form-urlencoded |
-| `403 Invalid Credential` | clé mal encodée (`+`/`/`/`=`) | clé en header `X-PAN-KEY` (ou URL-encoder) ; ne pas double-encoder |
-| `403 Invalid Credential` (persiste) | clé tronquée / avec espace / compte sans droit API | extraire `<key>` + trim ; vérifier rôle admin "XML API" du compte |
-| `Connection refused` / timeout | Panorama en IP interne non joignable | passer par un **MID Server** sur le réseau interne |
-| réponse vide / partielle | `target=<serial>` (vue firewall) | interroger Panorama sans `target` pour le shared complet |
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `400 Missing value for parameter "type"` | params not transmitted | put everything in the URL, or POST form-urlencoded |
+| `403 Invalid Credential` | key badly encoded (`+`/`/`/`=`) | key in `X-PAN-KEY` header (or URL-encode); never double-encode |
+| `403 Invalid Credential` (persists) | key truncated / has whitespace / account lacks API rights | extract `<key>` + trim; verify the account's admin role has "XML API" enabled |
+| `Connection refused` / timeout | Panorama on internal IP not reachable | route through a **MID Server** on the internal network |
+| empty / partial response | `target=<serial>` (firewall view) | query Panorama without `target` for the full shared config |
 
 ---
 
-## 9. Référence : le script Python qui fait tout ça
+## 9. Reference: the Python script
 
-`scripts/get_panorama_objects.py` (réutilise `scripts/panorama_client.py`) :
+`scripts/get_panorama_objects.py` (reuses `scripts/panorama_client.py`):
 ```bash
-python scripts/get_panorama_objects.py --csv objets.csv --json objets.json
-python scripts/get_panorama_objects.py --dg "NewMed - GDC" --json objets_dg.json
+python scripts/get_panorama_objects.py --csv objects.csv --json objects.json
+python scripts/get_panorama_objects.py --dg "NewMed - GDC" --json objects_dg.json
 ```
-Sortie validée : **28994 objets adresses + 622 groupes** (shared).
+Validated output (Production shared): **28,994 address objects + 622 groups**.
