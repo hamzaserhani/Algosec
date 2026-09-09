@@ -78,16 +78,25 @@ def xpaths(dg=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Recupere objets adresses + groupes depuis Panorama")
-    parser.add_argument("--config", default="config.json")
+    parser.add_argument("--config", help="Fichier de config (defaut: config.json en prod, config-dev.json avec --dev)")
+    parser.add_argument("--dev", action="store_true", help="Utiliser config-dev.json (environnement DEV)")
     parser.add_argument("--dg", help="Nom du device-group (sinon shared)")
     parser.add_argument("--csv", dest="csv_path", help="Export CSV des objets adresses")
     parser.add_argument("--json", dest="json_path", help="Export JSON complet (adresses + groupes)")
     parser.add_argument("--limit", type=int, help="N'afficher que les N premiers (aperçu)")
     args = parser.parse_args()
 
+    # Resolution du fichier de config :
+    #   --config <x>  -> prioritaire (override explicite)
+    #   --dev         -> config-dev.json (DEV)
+    #   defaut        -> config.json (PROD)
+    config_path = args.config or ("config-dev.json" if args.dev else "config.json")
+    print(f"[INFO] Environnement: {'DEV' if args.dev and not args.config else 'PROD' if not args.config else 'custom'} "
+          f"(config: {config_path})")
+
     # Reutilise le client eprouve (meme keygen/get que check_flows -> pas de
     # double encodage de la cle, cause du 'Invalid Credential' en reimplementant).
-    pano = PanoramaClient(args.config)
+    pano = PanoramaClient(config_path)
     pano.keygen()
 
     xp_addr, xp_grp = xpaths(args.dg)
