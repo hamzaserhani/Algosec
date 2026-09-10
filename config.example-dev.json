@@ -1,10 +1,10 @@
 {
-    "server": "https://your-algosec-server",
+    "server": "https://your-algosec-dev-server",
     "api_path": "/aff/api/external",
-    "username": "your_username",
-    "password": "your_password",
+    "username": "your_algosec_dev_username",
+    "password": "your_algosec_dev_password",
     "domain": "0",
-    "verify_ssl": true,
+    "verify_ssl": false,
     "template": "NPS - Firewall Rule Request - Add Firewall Rule - Helix Integration",
     "user": "Any",
     "_comment_fields": "Champs AU NIVEAU TICKET (envoyes avec 'key'). Utiliser le nom EXACT du champ tel que retourne par inspect_ticket_fields.py.",
@@ -25,17 +25,16 @@
             "user": "SX41-GBL-USR-APP"
         }
     },
-    "_comment_panorama": "Acces Panorama (credentials DISTINCTS d'AlgoSec ci-dessus). Utiliser username+password OU api_key.",
+    "_comment_panorama": "Acces Panorama DEV (credentials DISTINCTS d'AlgoSec ci-dessus). Utiliser username+password OU api_key.",
     "panorama": {
-        "server": "https://gdcpamgmt002.dir.ucb-group.com",
-        "username": "apisnow",
-        "password": "your_panorama_prod_password",
+        "server": "https://10.15.95.100",
+        "username": "your_panorama_dev_username",
+        "password": "your_panorama_dev_password",
         "verify_ssl": false
     },
-    "_comment_policy_firewalls": "Firewalls a evaluer par le moteur policy (informatif). name=libelle, serial=numero de serie.",
+    "_comment_policy_firewalls": "Firewalls DEV a evaluer par le moteur policy (informatif). name=libelle, serial=numero de serie.",
     "policy_firewalls": [
-        {"name": "pazcweufwp01", "serial": "1600UD8LGE4IBMP"},
-        {"name": "GDCFWBCKN001", "serial": "019909000914"}
+        {"name": "dev-fw-01", "serial": "REMPLIR_SERIAL_DEV"}
     ],
     "reporting": {
         "templates": [

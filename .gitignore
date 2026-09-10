@@ -1,4 +1,5 @@
 config.json
+config-dev.json
 *.pyc
 __pycache__/
 .env
