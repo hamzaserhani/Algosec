@@ -27,14 +27,14 @@
     },
     "_comment_panorama": "Acces Panorama DEV (credentials DISTINCTS d'AlgoSec ci-dessus). Utiliser username+password OU api_key.",
     "panorama": {
-        "server": "https://10.15.95.100",
+        "server": "https://your-panorama-dev-server",
         "username": "your_panorama_dev_username",
         "password": "your_panorama_dev_password",
         "verify_ssl": false
     },
     "_comment_policy_firewalls": "Firewalls DEV a evaluer par le moteur policy (informatif). name=libelle, serial=numero de serie.",
     "policy_firewalls": [
-        {"name": "dev-fw-01", "serial": "REMPLIR_SERIAL_DEV"}
+        {"name": "dev-firewall-name", "serial": "DEV_SERIAL"}
     ],
     "reporting": {
         "templates": [
