@@ -83,6 +83,47 @@ APP_SUSPECT = {
 }
 
 
+def diagnose_url_only(url_logs, flow, domain):
+    """Diagnostic pour un flux par DOMAINE (logs URL uniquement)."""
+    R = []
+    add = R.append
+    add(f"Flux (domaine) : {flow}")
+    add(f"Logs URL trouves : {len(url_logs)}")
+    add("")
+    if not url_logs:
+        add(">>> DIAGNOSTIC :")
+        add(f"    [INFO] Aucun log URL pour '{domain}'.")
+        add("           2 explications probables :")
+        add("           1) Les profils URL ne loggent souvent QUE les BLOCAGES, pas les")
+        add("              acces autorises -> si le flux passe, il peut ne rien logger ici.")
+        add("              => verifie plutot les logs TRAFFIC (ssl vers l'IP) :")
+        add(f"                 python scripts/diagnose_flow.py --src <ip> --dst <ip_du_domaine> --port 443 --proto tcp")
+        add("           2) Le domaine n'a pas ete visite sur la fenetre (--days), ou nom different.")
+        return R
+    by_action = tally(url_logs, "action")
+    by_cat = tally(url_logs, "category")
+    by_rule = tally(url_logs, "rule")
+    add(f"[URL] action={by_action} | categorie={by_cat}")
+    add(f"      regle={by_rule}")
+    add("")
+    add("Derniers acces :")
+    for e in url_logs[:8]:
+        add(f"  {e.get('time_generated')} {e.get('action'):10} -> {e.get('misc') or e.get('url')} "
+            f"[cat={e.get('category')}] rule={e.get('rule')}")
+    add("")
+    add(">>> DIAGNOSTIC :")
+    blocked = sum(v for k, v in by_action.items() if "block" in k or k == "deny")
+    allowed = sum(v for k, v in by_action.items() if k in ("alert", "allow", "continue"))
+    if blocked and not allowed:
+        add(f"    [BLOQUE] Acces refuse par filtrage URL. Categorie(s): {list(by_cat.keys())}.")
+        add("             -> autoriser la categorie/URL sur la regle, ou whitelister.")
+    elif blocked and allowed:
+        add(f"    [PARTIEL] Mix autorise ({allowed}) / bloque ({blocked}) selon l'URL exacte.")
+    else:
+        add(f"    [AUTORISE] Acces web autorise ({allowed}). Categorie(s): {list(by_cat.keys())}.")
+    return R
+
+
 def diagnose(logs_by_type, flow):
     R = []
     add = R.append
@@ -218,25 +259,29 @@ def main():
     since = datetime.datetime.now() - datetime.timedelta(days=args.days)
     since_str = since.strftime("%Y/%m/%d %H:%M:%S")
 
-    q_flow = build_query(args.src, args.dst, args.port, args.proto, since_str)
-    q_url = build_query(args.src, args.dst, None, None, since_str, by_url=args.url) if args.url \
-        else build_query(args.src, args.dst, None, None, since_str)
-
-    # Pour threat/decryption, pas de filtre port.dst (champs parfois absents) -> src/dst
-    q_sec = build_query(args.src, args.dst, None, args.proto, since_str)
-
     flow = f"{args.src or 'any'} -> {args.dst or args.url or 'any'} {(args.proto or '')}/{(args.port or 'any')}"
 
     pano = PanoramaClient(config_path)
     pano.keygen()
-    print(f"[...] Interrogation multi-logs depuis {since_str} (traffic/threat/url/decryption)...")
+    print(f"[...] Interrogation multi-logs depuis {since_str}...")
 
-    specs = [
-        ("traffic", q_flow, "traffic"),
-        ("threat", q_sec, "threat"),
-        ("url", q_url, "url"),
-        ("decryption", q_sec, "decryption"),
-    ]
+    # Mode DOMAINE (--url sans --dst) : les logs traffic ne contiennent pas l'URL
+    # -> filtrer le traffic par src seul ramasserait tout (bruit). On se concentre
+    # sur les logs URL (la vraie source pour un domaine).
+    url_only = bool(args.url) and not args.dst
+    if url_only:
+        q_url = build_query(args.src, None, None, None, since_str, by_url=args.url)
+        specs = [("url", q_url, "url")]
+    else:
+        q_flow = build_query(args.src, args.dst, args.port, args.proto, since_str)
+        q_sec = build_query(args.src, args.dst, None, args.proto, since_str)
+        q_url = build_query(args.src, args.dst, None, None, since_str, by_url=args.url)
+        specs = [
+            ("traffic", q_flow, "traffic"),
+            ("threat", q_sec, "threat"),
+            ("url", q_url, "url"),
+            ("decryption", q_sec, "decryption"),
+        ]
     logs = pano.query_logs_parallel(specs, nlogs=args.nlogs, max_wait=args.timeout)
     # Filtre les resultats en erreur (type de log non dispo sur l'instance)
     for k, v in list(logs.items()):
@@ -244,7 +289,10 @@ def main():
             print(f"    [WARN] log '{k}' indisponible: {v['_error']}")
             logs[k] = []
 
-    report = diagnose(logs, flow)
+    if url_only:
+        report = diagnose_url_only(logs.get("url", []), flow, args.url)
+    else:
+        report = diagnose(logs, flow)
     print("\n" + "=" * 60)
     for line in report:
         print(line)
