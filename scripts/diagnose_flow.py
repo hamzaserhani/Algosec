@@ -35,6 +35,31 @@ DECRYPT_SECTIONS = [
 ]
 
 
+def resolve_serial(pano, value):
+    """Resout un --serial : si c'est un hostname (ex: pazcweufwp01, Cloud NGFW qui
+    auto-scale avec des serials changeants), renvoie un serial VIVANT correspondant.
+    Si c'est deja un serial connecte, le renvoie tel quel.
+    """
+    try:
+        devices = pano.list_devices()  # [{serial, hostname}]
+    except Exception:
+        return value  # pas de resolution possible -> on garde tel quel
+    serials = {d["serial"] for d in devices}
+    if value in serials:
+        return value
+    # sinon, cherche par hostname (insensible a la casse)
+    matches = [d for d in devices if d.get("hostname", "").lower() == value.lower()]
+    if matches:
+        chosen = matches[0]["serial"]
+        others = [m["serial"] for m in matches[1:]]
+        note = f"(hostname '{value}' -> {len(matches)} instance(s) vivante(s), serial retenu: {chosen}"
+        note += f"; autres: {others})" if others else ")"
+        print(f"[INFO] {note}")
+        return chosen
+    print(f"[WARN] '{value}' introuvable parmi les firewalls connectes -> utilise tel quel.")
+    return value
+
+
 def check_decryption_rules(pano, serial, src, dst):
     """Verifie si le flux src->dst est pris par une regle de DECHIFFREMENT.
 
@@ -504,7 +529,7 @@ def main():
     p.add_argument("--port")
     p.add_argument("--proto")
     p.add_argument("--url", help="Domaine/URL (ajoute le filtre url contains)")
-    p.add_argument("--serial", help="Serial du firewall : verifie si le flux est pris par une regle de DECRYPTION")
+    p.add_argument("--serial", help="Serial OU hostname du firewall (resolu vers un serial vivant, utile pour Cloud NGFW autoscale) : verifie les regles de DECRYPTION")
     p.add_argument("--vs-src", dest="vs_src", help="2e source a COMPARER pour le meme --url (ex: 'ca marche depuis A, pas depuis B')")
     p.add_argument("--discover", action="store_true", help="Lister ce que --src contacte reellement (domaines URL + destinations IP)")
     p.add_argument("--config")
@@ -609,10 +634,11 @@ def main():
 
     # Confirmation DECRYPTION : si --serial + dst, on verifie la decryption-rulebase
     if args.serial and args.dst:
+        serial = resolve_serial(pano, args.serial)  # accepte un hostname (Cloud NGFW autoscale)
         report.append("")
-        report.append(f"[DECRYPTION RULES] Verification sur le firewall {args.serial}...")
+        report.append(f"[DECRYPTION RULES] Verification sur le firewall {serial}...")
         try:
-            matched = check_decryption_rules(pano, args.serial, args.src, args.dst)
+            matched = check_decryption_rules(pano, serial, args.src, args.dst)
             if not matched:
                 report.append("    Aucune regle de dechiffrement ne matche ce flux "
                               "-> le flux n'est probablement PAS dechiffre (hypothese decrypt a ecarter).")
