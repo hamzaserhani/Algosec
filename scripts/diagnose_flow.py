@@ -147,6 +147,67 @@ APP_SUSPECT = {
 }
 
 
+def discover(pano, src, port, since_str, nlogs, timeout):
+    """Que contacte reellement cette source ? Top domaines (URL) + top destinations (traffic).
+
+    Sert quand on ne connait pas l'IP/URL exacte vue par le firewall (cloud, geo-DNS).
+    """
+    R = []
+    R.append(f"=== DECOUVERTE : que contacte {src} ? ===")
+    base = [f"(time_generated geq '{since_str}')"]
+    if src:
+        base.append(f"(addr.src in {src})")
+    if port:
+        base.append(f"(port.dst eq {port})")
+    q = " and ".join(base)
+
+    # 1. Domaines via logs URL
+    try:
+        ulogs = pano.query_url_log(q, nlogs=nlogs, max_wait=timeout)
+    except Exception as e:
+        ulogs = []
+        R.append(f"[URL] erreur: {str(e).splitlines()[0]}")
+    if ulogs:
+        # top domaines (host de l'url/misc)
+        doms = {}
+        for e in ulogs:
+            u = (e.get("misc") or e.get("url") or "").split("/")[0]
+            if u:
+                d = doms.setdefault(u, {"n": 0, "act": set()})
+                d["n"] += _int(e.get("repeatcnt")) or 1
+                if e.get("action"):
+                    d["act"].add(e["action"])
+        R.append(f"[URL] {len(doms)} domaine(s) contacte(s) (top 15) :")
+        for dom, d in sorted(doms.items(), key=lambda kv: -kv[1]["n"])[:15]:
+            R.append(f"    {dom:45} {d['n']:4}  {sorted(d['act'])}")
+    else:
+        R.append("[URL] aucun log URL pour cette source.")
+
+    # 2. Destinations via logs traffic
+    try:
+        tlogs = pano.query_traffic_log(q, nlogs=nlogs, max_wait=timeout)
+    except Exception as e:
+        tlogs = []
+        R.append(f"[TRAFFIC] erreur: {str(e).splitlines()[0]}")
+    if tlogs:
+        dsts = {}
+        for e in tlogs:
+            dip = e.get("dst")
+            if dip:
+                dd = dsts.setdefault(dip, {"n": 0, "app": set(), "act": set()})
+                dd["n"] += _int(e.get("repeatcnt")) or 1
+                if e.get("app"):
+                    dd["app"].add(e["app"])
+                if e.get("action"):
+                    dd["act"].add(e["action"])
+        R.append(f"[TRAFFIC] {len(dsts)} destination(s) IP (top 15) :")
+        for ip, dd in sorted(dsts.items(), key=lambda kv: -kv[1]["n"])[:15]:
+            R.append(f"    {ip:16} {dd['n']:4}  app={sorted(dd['app'])} {sorted(dd['act'])}")
+    else:
+        R.append("[TRAFFIC] aucun log traffic pour cette source.")
+    return R
+
+
 def url_summary(pano, src, domain, since_str, nlogs, timeout):
     """Resume URL pour une source : {rules, categories, actions, count}."""
     c = [f"(time_generated geq '{since_str}')"]
@@ -421,6 +482,7 @@ def main():
     p.add_argument("--url", help="Domaine/URL (ajoute le filtre url contains)")
     p.add_argument("--serial", help="Serial du firewall : verifie si le flux est pris par une regle de DECRYPTION")
     p.add_argument("--vs-src", dest="vs_src", help="2e source a COMPARER pour le meme --url (ex: 'ca marche depuis A, pas depuis B')")
+    p.add_argument("--discover", action="store_true", help="Lister ce que --src contacte reellement (domaines URL + destinations IP)")
     p.add_argument("--config")
     p.add_argument("--dev", action="store_true")
     p.add_argument("--days", type=int, default=2)
@@ -440,6 +502,18 @@ def main():
     pano = PanoramaClient(config_path)
     pano.keygen()
     print(f"[...] Interrogation multi-logs depuis {since_str}...")
+
+    # Mode DECOUVERTE : que contacte cette source ?
+    if args.discover:
+        report = discover(pano, args.src, args.port, since_str, args.nlogs, args.timeout)
+        print("\n" + "=" * 60)
+        for line in report:
+            print(line)
+        print("=" * 60)
+        if args.json_path:
+            with open(args.json_path, "w", encoding="utf-8") as f:
+                json.dump({"report": report}, f, indent=2, ensure_ascii=False)
+        return
 
     # Mode COMPARAISON de 2 sources pour un domaine (ca marche depuis A, pas B)
     if args.vs_src and args.url:
