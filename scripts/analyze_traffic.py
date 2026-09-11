@@ -38,6 +38,54 @@ def build_query(src, dst, port, proto, since_str):
     return " and ".join(clauses)
 
 
+def build_url_query(src, domain, since_str):
+    clauses = [f"(time_generated geq '{since_str}')"]
+    if src:
+        clauses.append(f"(addr.src in {src})")
+    if domain:
+        clauses.append(f"(url contains '{domain}')")
+    return " and ".join(clauses)
+
+
+def analyze_url(logs, flow):
+    """Rapport pour les logs URL (flux internet par domaine)."""
+    report = []
+    R = report.append
+    total = sum(max(1, _int(e.get("repeatcnt"))) for e in logs)
+    R(f"Flux URL teste : {flow}")
+    R(f"Evenements URL : {total} (sur {len(logs)} entrees)")
+    if not logs:
+        R("")
+        R(">>> CONCLUSION : AUCUN log URL pour ce domaine.")
+        R("    - le domaine n'a pas ete visite sur la fenetre, ou nom different,")
+        R("    - ou le trafic ne passe pas par ce firewall. Elargis --days / verifie l'URL.")
+        return report
+    by_action = tally(logs, "action")
+    by_cat = tally(logs, "category")
+    by_rule = tally(logs, "rule")
+    R("")
+    R(f"Par action   : {by_action}")
+    R(f"Par categorie: {by_cat}")
+    R(f"Par regle    : {by_rule}")
+    R("")
+    R("Derniers acces :")
+    for e in logs[:8]:
+        R(f"  {e.get('time')} {e.get('action'):7} {e.get('src')} -> {e.get('url')} "
+          f"[cat={e.get('category')}] app={e.get('app')} rule={e.get('rule')}")
+    R("")
+    R(">>> CONCLUSIONS :")
+    blocked = sum(v for k, v in by_action.items() if k in ("block-url", "block", "deny", "block-continue"))
+    allowed = sum(v for k, v in by_action.items() if k in ("alert", "allow", "continue"))
+    if blocked and not allowed:
+        R(f"    [BLOQUE] Acces refuse par filtrage URL. Categorie(s): {list(by_cat.keys())}.")
+        R("             -> autoriser la categorie/URL sur la regle, ou ajouter a la whitelist.")
+    elif blocked and allowed:
+        R(f"    [PARTIEL] Mix autorise ({allowed}) / bloque ({blocked}) selon l'URL/categorie exacte.")
+    elif allowed:
+        R(f"    [AUTORISE] Acces web autorise ({allowed}). Categorie(s): {list(by_cat.keys())}.")
+    return report
+
+
 def _int(v):
     try:
         return int(v)
@@ -154,6 +202,7 @@ def main():
     parser.add_argument("--dst", help="IP/subnet destination")
     parser.add_argument("--port", help="Port destination")
     parser.add_argument("--proto", help="Protocole (tcp/udp) ou numero")
+    parser.add_argument("--url", help="Domaine/URL a diagnostiquer (interroge les logs URL au lieu des logs traffic)")
     parser.add_argument("--config", help="Fichier de config (defaut: config.json)")
     parser.add_argument("--dev", action="store_true", help="Utiliser config-dev.json")
     parser.add_argument("--days", type=int, default=2, help="Fenetre logs en jours (defaut 2)")
@@ -167,16 +216,25 @@ def main():
 
     since = datetime.datetime.now() - datetime.timedelta(days=args.days)
     since_str = since.strftime("%Y/%m/%d %H:%M:%S")
-    query = build_query(args.src, args.dst, args.port, args.proto, since_str)
-    flow = f"{args.src or 'any'} -> {args.dst or 'any'} {(args.proto or '')}/{(args.port or 'any')}"
 
     pano = PanoramaClient(config_path)
     pano.keygen()
-    print(f"[...] Recherche logs depuis {since_str}...")
-    logs = pano.query_traffic_log(query, nlogs=args.nlogs, max_wait=args.timeout)
-    print(f"[OK] {len(logs)} entree(s).\n")
 
-    report = analyze(logs, flow)
+    if args.url:
+        # Mode logs URL (flux internet par domaine)
+        query = build_url_query(args.src, args.url, since_str)
+        flow = f"{args.src or 'any'} -> URL contains '{args.url}'"
+        print(f"[...] Recherche logs URL depuis {since_str}...")
+        logs = pano.query_url_log(query, nlogs=args.nlogs, max_wait=args.timeout)
+        print(f"[OK] {len(logs)} entree(s).\n")
+        report = analyze_url(logs, flow)
+    else:
+        query = build_query(args.src, args.dst, args.port, args.proto, since_str)
+        flow = f"{args.src or 'any'} -> {args.dst or 'any'} {(args.proto or '')}/{(args.port or 'any')}"
+        print(f"[...] Recherche logs traffic depuis {since_str}...")
+        logs = pano.query_traffic_log(query, nlogs=args.nlogs, max_wait=args.timeout)
+        print(f"[OK] {len(logs)} entree(s).\n")
+        report = analyze(logs, flow)
     print("=" * 60)
     for line in report:
         print(line)

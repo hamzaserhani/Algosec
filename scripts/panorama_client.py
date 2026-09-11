@@ -139,11 +139,14 @@ class PanoramaClient:
                 return name
         return None
 
-    def submit_log_job(self, query, nlogs=20):
-        """Soumet une requete log et retourne le job id (asynchrone)."""
+    def submit_log_job(self, query, nlogs=20, log_type="traffic"):
+        """Soumet une requete log et retourne le job id (asynchrone).
+
+        log_type : 'traffic' (defaut), 'url', 'threat'...
+        """
         if not self.api_key:
             self.keygen()
-        params = {"type": "log", "log-type": "traffic", "query": query,
+        params = {"type": "log", "log-type": log_type, "query": query,
                   "nlogs": str(nlogs), "key": self.api_key}
         if self.debug:
             print(f"[DEBUG] Panorama log query: {query[:250]}")
@@ -180,6 +183,42 @@ class PanoramaClient:
         """
         job_ids = [self.submit_log_job(q, nlogs) for q in queries]
         return [self.fetch_log_job(jid, max_wait=max_wait, poll=poll) for jid in job_ids]
+
+    def query_url_log(self, query, nlogs=50, max_wait=120, poll=1.0):
+        """Requete sur les logs URL (log-type=url) : domaine, categorie, action."""
+        job_id = self.submit_log_job(query, nlogs, log_type="url")
+        xml_poll = self._fetch_raw(job_id, max_wait, poll)
+        return self._parse_url_entries(xml_poll)
+
+    def _fetch_raw(self, job_id, max_wait=120, poll=1.0):
+        """Poll un job et retourne le XML brut (pour parsers specifiques)."""
+        waited = 0.0
+        while waited < max_wait:
+            r = self.session.get(f"{self.server}/api/", params={
+                "type": "log", "action": "get", "job-id": job_id, "key": self.api_key})
+            r.raise_for_status()
+            status = re.search(r"<status>(\w+)</status>", r.text)
+            if status and status.group(1).upper() in ("FIN", "FINISHED"):
+                return r.text
+            time.sleep(poll)
+            waited += poll
+        raise Exception(f"URL log query timeout ({max_wait}s) pour job {job_id}")
+
+    @staticmethod
+    def _parse_url_entries(xml):
+        """Parse les entrees de logs URL."""
+        entries = []
+        for body in re.findall(r"<entry[^>]*>(.*?)</entry>", xml, re.S):
+            def g(tag):
+                m = re.search(rf"<{tag}>(.*?)</{tag}>", body, re.S)
+                return m.group(1).strip() if m else None
+            entries.append({
+                "action": g("action"), "src": g("src"), "dst": g("dst"),
+                "url": g("misc") or g("url"), "category": g("category"),
+                "app": g("app"), "rule": g("rule"), "time": g("time_generated"),
+                "repeatcnt": g("repeatcnt"),
+            })
+        return entries
 
     @staticmethod
     def _parse_log_entries(xml):
