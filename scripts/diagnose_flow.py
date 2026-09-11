@@ -191,6 +191,13 @@ def diagnose(logs_by_type, flow):
             findings.append(("PROBLEME", "Autorise mais AUCUN retour serveur (rx=0)",
                              "le serveur ne repond pas : service arrete / mauvais port / routing asymetrique. Pas le firewall."))
 
+        # RST client sur (quasi) toutes les sessions -> a signaler meme si non bloquant
+        rst_client = by_ser.get("tcp-rst-from-client", 0)
+        if allow and rst_client and rst_client >= 0.8 * allow and rx > 0:
+            findings.append(("INFO", f"Fermetures par RST client sur ~{rst_client}/{allow} sessions",
+                             "le flux passe (serveur repond), mais le CLIENT coupe par RST plutot que FIN. "
+                             "Souvent benin (navigateur/keepalive), a surveiller si l'appli signale des coupures/timeouts."))
+
     # ---------- 2. THREAT ----------
     if threat:
         by_threat = tally(threat, "threatid", "threat_name", "tid")
@@ -236,12 +243,17 @@ def diagnose(logs_by_type, flow):
     add("")
     add("=" * 60)
     add(">>> DIAGNOSTIC EXPERT :")
+    severities = {f[0] for f in findings}
+    blocking = severities & {"BLOQUE", "PROBLEME", "SUSPECT", "ATTENTION"}
     if not findings:
         if traffic:
-            add("    [OK] Aucune anomalie detectee. Le flux semble fonctionner normalement.")
+            add("    [OK] Aucune anomalie detectee. Le flux fonctionne normalement.")
         else:
             add("    [?] Pas assez de donnees pour conclure (aucun log).")
     else:
+        # Si aucune anomalie bloquante (que des INFO) -> le flux fonctionne + notes
+        if not blocking and traffic:
+            add("    [OK] Le flux fonctionne (serveur repond). Notes ci-dessous :")
         order = {"BLOQUE": 0, "PROBLEME": 1, "SUSPECT": 2, "ATTENTION": 3, "INFO": 4, "OK": 5}
         for sev, titre, detail in sorted(findings, key=lambda f: order.get(f[0], 9)):
             add(f"    [{sev}] {titre}")
