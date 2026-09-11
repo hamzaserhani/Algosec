@@ -244,27 +244,35 @@ def diagnose(logs_by_type, flow):
             findings.append(("PROBLEME", "Autorise mais AUCUN retour serveur (rx=0)",
                              "le serveur ne repond pas : service arrete / mauvais port / routing asymetrique. Pas le firewall."))
 
-        # RST client sur (quasi) toutes les sessions
+        # RST client sur (quasi) toutes les sessions -> analyse selon le VOLUME recu.
+        # Cle : un echec de dechiffrement/cert coupe des le handshake TLS -> peu
+        # d'octets recus (~handshake). Si beaucoup de donnees ont transite, le TLS
+        # a reussi -> le RST client est une fermeture applicative (benin).
         rst_client = by_ser.get("tcp-rst-from-client", 0)
         dst_public = any(_is_public(e.get("dst")) for e in traffic)
         is_ssl = "ssl" in by_app
+        rx_per_session = rx / allow if allow else 0
+        HANDSHAKE_MAX = 6000  # octets : au-dela, des donnees applicatives ont transite
         if allow and rst_client and rst_client >= 0.8 * allow:
-            if is_ssl and dst_public and rx > 0:
-                # Signature classique d'un echec de DECHIFFREMENT SSL sur client non-navigateur
+            if is_ssl and dst_public and rx_per_session < HANDSHAKE_MAX:
+                # Peu d'octets recus + RST systematique -> echec TLS probable (decrypt/cert)
                 findings.append(("PROBLEME",
-                    f"Probable echec de DECHIFFREMENT SSL ({rst_client}/{allow} sessions en RST client)",
-                    "flux SSL sortant, le serveur repond (handshake TCP ok) mais le CLIENT coupe "
-                    "systematiquement par RST -> tres probablement le firewall DECHIFFRE le SSL et "
-                    "presente son certificat forward-trust ; un client NON-navigateur (SAP, service, "
-                    "batch) ne peut pas 'accepter' un certif non fiable et avorte le TLS. "
-                    "VERIFIER : (1) ce flux est-il pris par une regle de DECRYPTION ? "
-                    "(2) le systeme SAP a-t-il la CA forward-trust du firewall dans son truststore ? "
-                    "FIX : exclure cette URL/categorie du dechiffrement (decryption no-decrypt), "
-                    "OU installer la CA forward-trust du firewall dans le truststore SAP."))
+                    f"Probable echec TLS/DECHIFFREMENT ({rst_client}/{allow} RST client, ~{int(rx_per_session)} o/session recus)",
+                    "flux SSL sortant coupe par le CLIENT avec TRES PEU de donnees recues "
+                    "(~handshake) -> le TLS n'aboutit pas. Cause frequente : le firewall DECHIFFRE "
+                    "et presente sa CA forward-trust, qu'un client non-navigateur (SAP/batch) refuse. "
+                    "VERIFIER la regle de DECRYPTION (--serial) + la CA dans le truststore SAP. "
+                    "FIX : no-decrypt sur l'URL/categorie, ou installer la CA forward-trust."))
+            elif is_ssl and dst_public and rx_per_session >= HANDSHAKE_MAX:
+                findings.append(("INFO",
+                    f"RST client sur {rst_client}/{allow} sessions, mais ~{int(rx_per_session)} o/session recus",
+                    "des DONNEES applicatives ont transite -> le TLS a REUSSI, le flux fonctionne. "
+                    "Le RST client est une fermeture abrupte (pool de connexions SAP, keepalive). "
+                    "Si l'appli signale des erreurs intermittentes, verifier cote applicatif/serveur, "
+                    "pas le dechiffrement (qui aurait coupe des le handshake)."))
             else:
                 findings.append(("INFO", f"Fermetures par RST client sur ~{rst_client}/{allow} sessions",
-                    "le flux passe mais le CLIENT coupe par RST plutot que FIN. Souvent benin "
-                    "(keepalive), a surveiller si l'appli signale des coupures/timeouts."))
+                    "le flux passe mais le CLIENT coupe par RST plutot que FIN. Souvent benin."))
 
     # ---------- 2. THREAT ----------
     if threat:
