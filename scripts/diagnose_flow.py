@@ -21,9 +21,53 @@ Usage:
 import argparse
 import datetime
 import json
+import re
 import socket
 
 from panorama_client import PanoramaClient
+from policy_engine import PolicyEngine, _members, _text, VSYS, LOCAL
+
+# Sections de la decryption-rulebase (ordre d'evaluation), via target=serial
+DECRYPT_SECTIONS = [
+    ("pushed_pre", f"{VSYS}/pre-rulebase/decryption/rules"),
+    ("local", f"{LOCAL}/rulebase/decryption/rules"),
+    ("pushed_post", f"{VSYS}/post-rulebase/decryption/rules"),
+]
+
+
+def check_decryption_rules(pano, serial, src, dst):
+    """Verifie si le flux src->dst est pris par une regle de DECHIFFREMENT.
+
+    Retourne (liste de regles matchees [{name,action,type,category}], note).
+    Reutilise PolicyEngine pour la resolution d'objets (adresses).
+    """
+    eng = PolicyEngine(pano, serial)
+    eng.load_objects()
+    matched = []
+    for label, xpath in DECRYPT_SECTIONS:
+        try:
+            xml = pano.get_config_target(xpath, serial)
+        except Exception:
+            continue
+        for entry in re.findall(r"<entry\b[^>]*>.*?</entry>", xml, re.S):
+            name_m = re.search(r'name="([^"]+)"', entry)
+            name = name_m.group(1) if name_m else "?"
+            if (_text(entry, "disabled") or "no").lower() == "yes":
+                continue
+            sources = _members(entry, "source")
+            dests = _members(entry, "destination")
+            cats = _members(entry, "category")
+            action = _text(entry, "action") or ""      # decrypt / no-decrypt
+            # type : <type><ssl-forward-proxy/></type> ou <type><ssl-inbound-inspection>...
+            tmatch = re.search(r"<type>\s*<([\w-]+)", entry)
+            rtype = tmatch.group(1) if tmatch else ""
+            try:
+                if eng._addr_match(sources, src) and eng._addr_match(dests, dst):
+                    matched.append({"name": name, "section": label, "action": action,
+                                    "type": rtype, "category": cats})
+            except Exception:
+                continue
+    return matched
 
 
 def resolve_domain(domain):
@@ -292,6 +336,7 @@ def main():
     p.add_argument("--port")
     p.add_argument("--proto")
     p.add_argument("--url", help="Domaine/URL (ajoute le filtre url contains)")
+    p.add_argument("--serial", help="Serial du firewall : verifie si le flux est pris par une regle de DECRYPTION")
     p.add_argument("--config")
     p.add_argument("--dev", action="store_true")
     p.add_argument("--days", type=int, default=2)
@@ -363,6 +408,30 @@ def main():
                 report.append(f"[DNS] Impossible de resoudre '{args.url}' (pas de DNS depuis cette machine).")
     else:
         report = diagnose(logs, flow)
+
+    # Confirmation DECRYPTION : si --serial + dst, on verifie la decryption-rulebase
+    if args.serial and args.dst:
+        report.append("")
+        report.append(f"[DECRYPTION RULES] Verification sur le firewall {args.serial}...")
+        try:
+            matched = check_decryption_rules(pano, args.serial, args.src, args.dst)
+            if not matched:
+                report.append("    Aucune regle de dechiffrement ne matche ce flux "
+                              "-> le flux n'est probablement PAS dechiffre (hypothese decrypt a ecarter).")
+            for m in matched:
+                act = (m["action"] or m["type"] or "?").lower()
+                if "no-decrypt" in act:
+                    report.append(f"    [OK] Regle '{m['name']}' -> no-decrypt "
+                                  f"(cat={m['category']}) : ce flux N'EST PAS dechiffre.")
+                else:
+                    report.append(f"    [CONFIRME] Regle '{m['name']}' -> DECRYPT "
+                                  f"(type={m['type']}, cat={m['category']}).")
+                    report.append("               => le firewall DECHIFFRE ce flux. Si le client SAP ne fait")
+                    report.append("                  pas confiance a la CA forward-trust -> echec TLS (RST client).")
+                    report.append("               FIX: passer ce flux en 'no-decrypt', ou installer la CA dans SAP.")
+        except Exception as e:
+            report.append(f"    [WARN] lecture decryption-rulebase echouee: {str(e).splitlines()[0]}")
+
     print("\n" + "=" * 60)
     for line in report:
         print(line)
