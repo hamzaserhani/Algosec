@@ -21,8 +21,19 @@ Usage:
 import argparse
 import datetime
 import json
+import socket
 
 from panorama_client import PanoramaClient
+
+
+def resolve_domain(domain):
+    """Resout un domaine en liste d'IP (best-effort, stdlib). [] si echec."""
+    try:
+        infos = socket.getaddrinfo(domain, None)
+        ips = sorted({str(i[4][0]) for i in infos if ":" not in str(i[4][0])})  # IPv4
+        return ips
+    except (socket.gaierror, OSError):
+        return []
 
 
 def _int(v):
@@ -290,7 +301,30 @@ def main():
             logs[k] = []
 
     if url_only:
-        report = diagnose_url_only(logs.get("url", []), flow, args.url)
+        url_logs = logs.get("url", [])
+        report = diagnose_url_only(url_logs, flow, args.url)
+        # Pas de log URL (acces autorises souvent non logges) -> on resout le
+        # domaine en IP et on analyse les logs TRAFFIC vers ces IP (vrai signal).
+        if not url_logs:
+            ips = resolve_domain(args.url)
+            if ips:
+                report.append("")
+                report.append(f"[DNS] '{args.url}' resolu en : {', '.join(ips[:8])}"
+                              + (f" (+{len(ips)-8})" if len(ips) > 8 else ""))
+                report.append("      Analyse des logs TRAFFIC vers ces IP...")
+                dst_filter = " or ".join(f"(addr.dst in {ip})" for ip in ips[:8])
+                q = f"(time_generated geq '{since_str}')"
+                if args.src:
+                    q += f" and (addr.src in {args.src})"
+                q += f" and ({dst_filter})"
+                try:
+                    tlogs = pano.query_traffic_log(q, nlogs=args.nlogs, max_wait=args.timeout)
+                    report += diagnose({"traffic": tlogs}, f"{flow} (via IP resolues)")
+                except Exception as e:
+                    report.append(f"      [WARN] requete traffic echouee: {str(e).splitlines()[0]}")
+            else:
+                report.append("")
+                report.append(f"[DNS] Impossible de resoudre '{args.url}' (pas de DNS depuis cette machine).")
     else:
         report = diagnose(logs, flow)
     print("\n" + "=" * 60)
