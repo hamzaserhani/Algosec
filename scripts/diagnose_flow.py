@@ -226,6 +226,24 @@ def diagnose_url_only(url_logs, flow, domain):
     by_rule = tally(url_logs, "rule")
     add(f"[URL] action={by_action} | categorie={by_cat}")
     add(f"      regle={by_rule}")
+
+    # Ventilation PAR IP SOURCE : qui d'autre va vers ce lien, et avec quel verdict ?
+    by_src = {}
+    for e in url_logs:
+        s = e.get("src") or "(vide)"
+        d = by_src.setdefault(s, {"n": 0, "actions": set(), "rules": set()})
+        d["n"] += _int(e.get("repeatcnt")) or 1
+        if e.get("action"):
+            d["actions"].add(e["action"])
+        if e.get("rule"):
+            d["rules"].add(e["rule"])
+    if len(by_src) > 1:
+        add("")
+        add(f"[PAR SOURCE] {len(by_src)} IP source(s) atteignent '{domain}' :")
+        for s, d in sorted(by_src.items(), key=lambda kv: -kv[1]["n"]):
+            verdict = "BLOQUE" if any("block" in a or a == "deny" for a in d["actions"]) else "autorise"
+            add(f"    {s:16} {d['n']:4} acces  [{verdict}]  actions={sorted(d['actions'])} regle={sorted(d['rules'])}")
+
     add("")
     add("Derniers acces :")
     for e in url_logs[:8]:
