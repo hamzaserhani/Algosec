@@ -194,6 +194,13 @@ class PanoramaClient:
                 "dport": g("dport"), "rule": g("rule"), "time": g("time_generated"),
                 "app": g("app"), "proto": g("proto"),
                 "device_name": g("device_name"), "serial": g("serial"),
+                # Champs de diagnostic (troubleshooting)
+                "session_end_reason": g("session-end-reason"),
+                "bytes_sent": g("bytes_sent"), "bytes_received": g("bytes_received"),
+                "bytes": g("bytes"), "packets": g("packets"),
+                "repeatcnt": g("repeatcnt"),
+                "from_zone": g("from"), "to_zone": g("to"),
+                "category": g("category"), "sport": g("sport"),
             })
         return entries
 
