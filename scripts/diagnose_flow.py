@@ -147,6 +147,63 @@ APP_SUSPECT = {
 }
 
 
+def url_summary(pano, src, domain, since_str, nlogs, timeout):
+    """Resume URL pour une source : {rules, categories, actions, count}."""
+    c = [f"(time_generated geq '{since_str}')"]
+    if src:
+        c.append(f"(addr.src in {src})")
+    c.append(f"(url contains '{domain}')")
+    logs = pano.query_url_log(" and ".join(c), nlogs=nlogs, max_wait=timeout)
+    return {
+        "count": len(logs),
+        "actions": tally(logs, "action"),
+        "categories": tally(logs, "category"),
+        "rules": tally(logs, "rule"),
+        "sample": logs[:3],
+    }
+
+
+def compare_sources(pano, src_ok, src_ko, domain, since_str, nlogs, timeout):
+    """Compare deux sources pour un meme domaine (ex: 'marche' vs 'marche pas')."""
+    R = []
+    R.append(f"=== COMPARAISON pour '{domain}' ===")
+    a = url_summary(pano, src_ok, domain, since_str, nlogs, timeout)
+    b = url_summary(pano, src_ko, domain, since_str, nlogs, timeout)
+    R.append("")
+    R.append(f"[SOURCE A] {src_ok}  ({a['count']} logs URL)")
+    R.append(f"    action={a['actions']} | categorie={a['categories']}")
+    R.append(f"    regle={a['rules']}")
+    R.append(f"[SOURCE B] {src_ko}  ({b['count']} logs URL)")
+    R.append(f"    action={b['actions']} | categorie={b['categories']}")
+    R.append(f"    regle={b['rules']}")
+    R.append("")
+    R.append(">>> DIFFERENCES :")
+    diff = False
+    if set(a["rules"]) != set(b["rules"]):
+        diff = True
+        R.append(f"    [REGLE] A et B ne matchent PAS les memes regles :")
+        R.append(f"            A: {list(a['rules'].keys())}")
+        R.append(f"            B: {list(b['rules'].keys())}")
+        R.append("            -> les deux sources sont traitees par des regles differentes")
+        R.append("               (zones/objets source differents) -> profils (decryption, URL,")
+        R.append("               security) potentiellement differents. C'est la piste n1.")
+    if set(a["categories"]) != set(b["categories"]):
+        diff = True
+        R.append(f"    [CATEGORIE] categories differentes A={list(a['categories'])} B={list(b['categories'])}")
+    if set(a["actions"]) != set(b["actions"]):
+        diff = True
+        R.append(f"    [ACTION] actions differentes A={list(a['actions'])} B={list(b['actions'])}")
+    if b["count"] == 0 and a["count"] > 0:
+        diff = True
+        R.append(f"    [ABSENCE] Aucun log URL pour B ({src_ko}) -> soit B n'a pas tente,")
+        R.append("              soit son trafic ne passe pas par ce firewall / autre chemin.")
+    if not diff:
+        R.append("    Aucune difference notable cote URL. Si B echoue quand meme, la cause")
+        R.append("    est ailleurs (decryption cote B, cert, appli). Comparer les logs TRAFFIC")
+        R.append("    des 2 sources (--src B --dst <ip> ... --serial <fw>).")
+    return R
+
+
 def diagnose_url_only(url_logs, flow, domain):
     """Diagnostic pour un flux par DOMAINE (logs URL uniquement)."""
     R = []
@@ -345,6 +402,7 @@ def main():
     p.add_argument("--proto")
     p.add_argument("--url", help="Domaine/URL (ajoute le filtre url contains)")
     p.add_argument("--serial", help="Serial du firewall : verifie si le flux est pris par une regle de DECRYPTION")
+    p.add_argument("--vs-src", dest="vs_src", help="2e source a COMPARER pour le meme --url (ex: 'ca marche depuis A, pas depuis B')")
     p.add_argument("--config")
     p.add_argument("--dev", action="store_true")
     p.add_argument("--days", type=int, default=2)
@@ -364,6 +422,19 @@ def main():
     pano = PanoramaClient(config_path)
     pano.keygen()
     print(f"[...] Interrogation multi-logs depuis {since_str}...")
+
+    # Mode COMPARAISON de 2 sources pour un domaine (ca marche depuis A, pas B)
+    if args.vs_src and args.url:
+        report = compare_sources(pano, args.src, args.vs_src, args.url, since_str,
+                                 args.nlogs, args.timeout)
+        print("\n" + "=" * 60)
+        for line in report:
+            print(line)
+        print("=" * 60)
+        if args.json_path:
+            with open(args.json_path, "w", encoding="utf-8") as f:
+                json.dump({"report": report}, f, indent=2, ensure_ascii=False)
+        return
 
     # Mode DOMAINE (--url sans --dst) : les logs traffic ne contiennent pas l'URL
     # -> filtrer le traffic par src seul ramasserait tout (bruit). On se concentre
@@ -400,7 +471,10 @@ def main():
                 report.append("")
                 report.append(f"[DNS] '{args.url}' resolu en : {', '.join(ips[:8])}"
                               + (f" (+{len(ips)-8})" if len(ips) > 8 else ""))
-                report.append("      Analyse des logs TRAFFIC vers ces IP...")
+                report.append("      ATTENTION: service potentiellement geo-distribue (cloud) -> ces IP")
+                report.append("      peuvent DIFFERER de celles vues par le firewall (+ IPv6 non couvert).")
+                report.append("      Les LOGS URL ci-dessus sont la source fiable pour un domaine.")
+                report.append("      Analyse des logs TRAFFIC vers ces IP (best-effort)...")
                 dst_filter = " or ".join(f"(addr.dst in {ip})" for ip in ips[:8])
                 q = f"(time_generated geq '{since_str}')"
                 if args.src:
