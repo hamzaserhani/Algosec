@@ -201,8 +201,21 @@ def discover(pano, src, port, since_str, nlogs, timeout):
                 if e.get("action"):
                     dd["act"].add(e["action"])
         R.append(f"[TRAFFIC] {len(dsts)} destination(s) IP (top 15) :")
+        reset_ips = []
         for ip, dd in sorted(dsts.items(), key=lambda kv: -kv[1]["n"])[:15]:
-            R.append(f"    {ip:16} {dd['n']:4}  app={sorted(dd['app'])} {sorted(dd['act'])}")
+            is_reset = any("reset" in a or a in ("deny", "drop") for a in dd["act"])
+            flag = "  <-- [!] FIREWALL RESET/DENY" if is_reset else ""
+            R.append(f"    {ip:16} {dd['n']:4}  app={sorted(dd['app'])} {sorted(dd['act'])}{flag}")
+            if is_reset:
+                reset_ips.append(ip)
+        if reset_ips:
+            R.append("")
+            R.append(f">>> [!] {len(reset_ips)} destination(s) COUPEE(S) par le firewall (reset/deny) :")
+            R.append(f"        {', '.join(reset_ips)}")
+            R.append("        reset-both = le firewall termine activement la session -> profil de")
+            R.append("        securite (threat), echec de dechiffrement SSL, ou deny-reset.")
+            R.append("        -> analyser en detail chacune :")
+            R.append(f"           python scripts/diagnose_flow.py --src {src} --dst {reset_ips[0]} --port {port or 443} --proto tcp --serial <fw>")
     else:
         R.append("[TRAFFIC] aucun log traffic pour cette source.")
     return R
@@ -355,12 +368,23 @@ def diagnose(logs_by_type, flow):
         add(f"          session-end={by_ser} | octets tx/rx={tx}/{rx}")
 
         allow = sum(v for k, v in by_action.items() if k == "allow")
+        reset = sum(v for k, v in by_action.items() if "reset" in str(k))
         deny = sum(v for k, v in by_action.items() if k and k != "allow" and k != "(vide)")
 
-        if deny and not allow:
+        if reset:
+            # reset-both/-client/-server = le FIREWALL termine activement la session.
+            # Cause typique : profil de securite (threat) ou echec de dechiffrement SSL.
+            findings.append(("PROBLEME", f"Firewall RESET la session ({reset} sessions, action reset-*)",
+                             "ce n'est PAS un simple deny de policy : le firewall a etabli puis COUPE "
+                             "activement la connexion (reset-both). Causes typiques : profil de securite "
+                             "(THREAT) qui reset, ou echec de DECHIFFREMENT SSL (decrypt-error). "
+                             "-> voir logs THREAT et DECRYPTION ci-dessous, et la regle "
+                             f"{list(by_rule.keys())} (profils attaches). Souvent : SNI/URL absent de la "
+                             "categorie custom autorisee -> le trafic est reset."))
+        if deny and not allow and not reset:
             findings.append(("BLOQUE", "Bloque par la policy (deny)",
                              f"regle(s): {list(by_rule.keys())}. Il faut une regle d'autorisation."))
-        elif deny and allow:
+        elif (deny - reset) > 0 and allow:
             findings.append(("PARTIEL", "Mix allow/deny",
                              f"allow={allow}, deny={deny} -> depend de la regle qui matche (port/source variable)."))
 
