@@ -43,6 +43,15 @@ def _int(v):
         return 0
 
 
+def _is_public(ip):
+    """True si l'IP est publique (destination internet)."""
+    import ipaddress
+    try:
+        return not ipaddress.ip_address(str(ip)).is_private
+    except ValueError:
+        return False
+
+
 def _rep(e):
     return max(1, _int(e.get("repeatcnt")))
 
@@ -191,12 +200,27 @@ def diagnose(logs_by_type, flow):
             findings.append(("PROBLEME", "Autorise mais AUCUN retour serveur (rx=0)",
                              "le serveur ne repond pas : service arrete / mauvais port / routing asymetrique. Pas le firewall."))
 
-        # RST client sur (quasi) toutes les sessions -> a signaler meme si non bloquant
+        # RST client sur (quasi) toutes les sessions
         rst_client = by_ser.get("tcp-rst-from-client", 0)
-        if allow and rst_client and rst_client >= 0.8 * allow and rx > 0:
-            findings.append(("INFO", f"Fermetures par RST client sur ~{rst_client}/{allow} sessions",
-                             "le flux passe (serveur repond), mais le CLIENT coupe par RST plutot que FIN. "
-                             "Souvent benin (navigateur/keepalive), a surveiller si l'appli signale des coupures/timeouts."))
+        dst_public = any(_is_public(e.get("dst")) for e in traffic)
+        is_ssl = "ssl" in by_app
+        if allow and rst_client and rst_client >= 0.8 * allow:
+            if is_ssl and dst_public and rx > 0:
+                # Signature classique d'un echec de DECHIFFREMENT SSL sur client non-navigateur
+                findings.append(("PROBLEME",
+                    f"Probable echec de DECHIFFREMENT SSL ({rst_client}/{allow} sessions en RST client)",
+                    "flux SSL sortant, le serveur repond (handshake TCP ok) mais le CLIENT coupe "
+                    "systematiquement par RST -> tres probablement le firewall DECHIFFRE le SSL et "
+                    "presente son certificat forward-trust ; un client NON-navigateur (SAP, service, "
+                    "batch) ne peut pas 'accepter' un certif non fiable et avorte le TLS. "
+                    "VERIFIER : (1) ce flux est-il pris par une regle de DECRYPTION ? "
+                    "(2) le systeme SAP a-t-il la CA forward-trust du firewall dans son truststore ? "
+                    "FIX : exclure cette URL/categorie du dechiffrement (decryption no-decrypt), "
+                    "OU installer la CA forward-trust du firewall dans le truststore SAP."))
+            else:
+                findings.append(("INFO", f"Fermetures par RST client sur ~{rst_client}/{allow} sessions",
+                    "le flux passe mais le CLIENT coupe par RST plutot que FIN. Souvent benin "
+                    "(keepalive), a surveiller si l'appli signale des coupures/timeouts."))
 
     # ---------- 2. THREAT ----------
     if threat:
