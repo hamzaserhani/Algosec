@@ -395,20 +395,34 @@ def diagnose(logs_by_type, flow):
         allow = sum(v for k, v in by_action.items() if k == "allow")
         reset = sum(v for k, v in by_action.items() if "reset" in str(k))
         deny = sum(v for k, v in by_action.items() if k and k != "allow" and k != "(vide)")
+        # Indices pour distinguer deny explicite vs reset par profil
+        is_policy_deny = "policy-deny" in [str(k).lower() for k in by_ser]
+        rules = [str(r) for r in by_rule]
+        is_default_rule = any(("default" in r.lower()) for r in rules)  # interzone-default/intrazone-default
 
-        if reset:
-            # reset-both/-client/-server = le FIREWALL termine activement la session.
-            # Cause typique : profil de securite (threat) ou echec de dechiffrement SSL.
+        if (deny or reset) and is_policy_deny:
+            # session-end = policy-deny -> c'est un DENY de policy (le reset-both n'est
+            # que la mecanique du deny), PAS un profil threat/decrypt.
+            if is_default_rule:
+                findings.append(("BLOQUE",
+                    f"AUCUNE regle explicite n'autorise ce flux -> tombe sur '{', '.join(rules)}' (deny par defaut)",
+                    "le flux n'est couvert par aucune regle d'autorisation et atteint la regle "
+                    "par defaut inter/intra-zone qui le refuse (reset-both). "
+                    "-> CREER une regle d'autorisation pour ce flux (ticket AlgoSec), OU si des regles "
+                    "d'autorisation existent deja pour ce service, cette DESTINATION n'y est pas couverte "
+                    "(IP/SNI absent des objets ou de la categorie URL custom autorisee)."))
+            else:
+                findings.append(("BLOQUE", f"Bloque par la policy (deny) - regle '{', '.join(rules)}'",
+                    "refus explicite par cette regle. Corriger la regle ou creer une autorisation."))
+        elif reset:
+            # reset sans policy-deny -> vraie piste profil de securite / decrypt
             findings.append(("PROBLEME", f"Firewall RESET la session ({reset} sessions, action reset-*)",
-                             "ce n'est PAS un simple deny de policy : le firewall a etabli puis COUPE "
-                             "activement la connexion (reset-both). Causes typiques : profil de securite "
-                             "(THREAT) qui reset, ou echec de DECHIFFREMENT SSL (decrypt-error). "
-                             "-> voir logs THREAT et DECRYPTION ci-dessous, et la regle "
-                             f"{list(by_rule.keys())} (profils attaches). Souvent : SNI/URL absent de la "
-                             "categorie custom autorisee -> le trafic est reset."))
-        if deny and not allow and not reset:
+                             "le firewall a etabli puis COUPE activement la connexion sans deny de policy "
+                             "explicite -> profil de securite (THREAT) ou echec de DECHIFFREMENT SSL. "
+                             "-> voir logs THREAT et DECRYPTION ci-dessous."))
+        elif deny and not allow:
             findings.append(("BLOQUE", "Bloque par la policy (deny)",
-                             f"regle(s): {list(by_rule.keys())}. Il faut une regle d'autorisation."))
+                             f"regle(s): {rules}. Il faut une regle d'autorisation."))
         elif (deny - reset) > 0 and allow:
             findings.append(("PARTIEL", "Mix allow/deny",
                              f"allow={allow}, deny={deny} -> depend de la regle qui matche (port/source variable)."))
@@ -418,8 +432,10 @@ def diagnose(logs_by_type, flow):
             if app in by_app:
                 findings.append(("SUSPECT", f"App '{app}' detectee", expl))
 
-        # session-end-reason
+        # session-end-reason (policy-deny deja traite ci-dessus -> on l'exclut)
         for reason, cnt in by_ser.items():
+            if str(reason).lower() == "policy-deny":
+                continue
             sev, expl = SER.get(str(reason).lower(), (None, None))
             if sev and sev not in ("OK", "INFO"):
                 findings.append((sev, f"session-end-reason '{reason}' (x{cnt})", expl))
