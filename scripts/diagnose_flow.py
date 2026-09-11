@@ -1,0 +1,260 @@
+"""
+Diagnostic EXPERT d'un flux - correlation multi-logs Panorama.
+
+A la maniere d'un expert firewall Palo Alto, ce script interroge PLUSIEURS types
+de logs pour un flux donne et les CORRELE pour trouver la cause racine :
+
+    - traffic   : passe / bloque, session-end-reason, octets, app, regle
+    - threat    : blocage par profil (vulnerability/virus/spyware/dns...)
+    - url        : filtrage par categorie d'URL
+    - decryption : echecs de dechiffrement SSL (cert, cipher, version TLS)
+
+Il produit un rapport avec des hypotheses de cause racine classees, comme un
+vrai troubleshooting expert.
+
+Usage:
+    python diagnose_flow.py --src 10.120.2.207 --dst 10.1.39.11 --port 443 --proto tcp
+    python diagnose_flow.py --src 10.120.2.207 --url login.microsoftonline.com
+    python diagnose_flow.py --src ... --dst ... --port 443 --proto tcp --dev --days 3 --json d.json
+"""
+
+import argparse
+import datetime
+import json
+
+from panorama_client import PanoramaClient
+
+
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rep(e):
+    return max(1, _int(e.get("repeatcnt")))
+
+
+def tally(logs, *keys):
+    """Compte par le 1er champ non vide parmi keys (avec repeatcnt)."""
+    out = {}
+    for e in logs:
+        v = next((e.get(k) for k in keys if e.get(k)), "(vide)")
+        out[v] = out.get(v, 0) + _rep(e)
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+def build_query(src, dst, port, proto, since_str, by_url=None):
+    c = [f"(time_generated geq '{since_str}')"]
+    if src:
+        c.append(f"(addr.src in {src})")
+    if dst:
+        c.append(f"(addr.dst in {dst})")
+    if port:
+        c.append(f"(port.dst eq {port})")
+    if proto:
+        c.append(f"(proto eq {proto})")
+    if by_url:
+        c.append(f"(url contains '{by_url}')")
+    return " and ".join(c)
+
+
+# session-end-reason -> (gravite, explication) pour un expert
+SER = {
+    "tcp-fin": ("OK", "fermeture TCP normale -> le flux fonctionne"),
+    "tcp-rst-from-server": ("PROBLEME", "RST du SERVEUR -> port ferme / service down / rejet applicatif (pas le firewall)"),
+    "tcp-rst-from-client": ("INFO", "RST du CLIENT -> abandon cote client"),
+    "aged-out": ("SUSPECT", "session expiree sans close -> pas de reponse serveur (one-way), ou UDP"),
+    "policy-deny": ("BLOQUE", "refuse par une regle de securite"),
+    "threat": ("BLOQUE", "bloque par un profil de securite -> voir logs THREAT"),
+    "decrypt-cert-validation": ("PROBLEME", "echec validation certificat (SSL decrypt)"),
+    "decrypt-unsupport-param": ("PROBLEME", "parametres SSL non supportes (cipher/version) en decrypt"),
+    "decrypt-error": ("PROBLEME", "erreur de dechiffrement SSL"),
+    "unknown": ("INFO", "raison inconnue"),
+}
+
+# app suspectes (handshake incomplet)
+APP_SUSPECT = {
+    "incomplete": "handshake TCP jamais termine -> le serveur ne repond pas (SYN sans SYN-ACK) ou flux coupe",
+    "insufficient-data": "pas assez de donnees pour identifier l'app -> connexion etablie mais peu/pas d'echange applicatif",
+    "unknown-tcp": "trafic TCP non identifie par App-ID",
+    "unknown-udp": "trafic UDP non identifie",
+}
+
+
+def diagnose(logs_by_type, flow):
+    R = []
+    add = R.append
+    traffic = logs_by_type.get("traffic", []) or []
+    threat = logs_by_type.get("threat", []) or []
+    url = logs_by_type.get("url", []) or []
+    decrypt = logs_by_type.get("decryption", []) or []
+
+    add(f"Flux : {flow}")
+    add(f"Logs trouves -> traffic:{len(traffic)}  threat:{len(threat)}  url:{len(url)}  decryption:{len(decrypt)}")
+    add("")
+
+    findings = []   # (gravite, titre, detail)
+
+    # ---------- 1. TRAFFIC ----------
+    if not traffic:
+        findings.append(("INFO", "Aucun log TRAFFIC",
+                         "le flux n'atteint peut-etre pas ce firewall (autre chemin), "
+                         "ou aucun trafic sur la fenetre (--days), ou mauvais parametres."))
+    else:
+        by_action = tally(traffic, "action")
+        by_rule = tally(traffic, "rule")
+        by_app = tally(traffic, "app")
+        by_ser = tally(traffic, "session_end_reason", "session-end-reason")
+        tx = sum(_int(e.get("bytes_sent")) for e in traffic)
+        rx = sum(_int(e.get("bytes_received")) for e in traffic)
+        add(f"[TRAFFIC] action={by_action} | app={by_app}")
+        add(f"          regle={by_rule}")
+        add(f"          session-end={by_ser} | octets tx/rx={tx}/{rx}")
+
+        allow = sum(v for k, v in by_action.items() if k == "allow")
+        deny = sum(v for k, v in by_action.items() if k and k != "allow" and k != "(vide)")
+
+        if deny and not allow:
+            findings.append(("BLOQUE", "Bloque par la policy (deny)",
+                             f"regle(s): {list(by_rule.keys())}. Il faut une regle d'autorisation."))
+        elif deny and allow:
+            findings.append(("PARTIEL", "Mix allow/deny",
+                             f"allow={allow}, deny={deny} -> depend de la regle qui matche (port/source variable)."))
+
+        # apps suspectes
+        for app, expl in APP_SUSPECT.items():
+            if app in by_app:
+                findings.append(("SUSPECT", f"App '{app}' detectee", expl))
+
+        # session-end-reason
+        for reason, cnt in by_ser.items():
+            sev, expl = SER.get(str(reason).lower(), (None, None))
+            if sev and sev not in ("OK", "INFO"):
+                findings.append((sev, f"session-end-reason '{reason}' (x{cnt})", expl))
+
+        # retour serveur
+        if allow and rx == 0 and tx > 0:
+            findings.append(("PROBLEME", "Autorise mais AUCUN retour serveur (rx=0)",
+                             "le serveur ne repond pas : service arrete / mauvais port / routing asymetrique. Pas le firewall."))
+
+    # ---------- 2. THREAT ----------
+    if threat:
+        by_threat = tally(threat, "threatid", "threat_name", "tid")
+        by_sev = tally(threat, "severity")
+        by_taction = tally(threat, "action")
+        add("")
+        add(f"[THREAT] menaces={by_threat}")
+        add(f"         severite={by_sev} | action={by_taction}")
+        blocked = [k for k in by_taction if k in ("reset-both", "reset-client", "reset-server", "drop", "block", "deny", "block-ip")]
+        if blocked:
+            findings.append(("BLOQUE", "Bloque par un PROFIL DE SECURITE (threat)",
+                             f"menace(s): {list(by_threat.keys())}, action: {blocked}. "
+                             "-> ajuster le profil (exception/whitelist) ou corriger le trafic."))
+        else:
+            findings.append(("ATTENTION", "Evenements threat (alert)",
+                             f"{list(by_threat.keys())} en alerte (non bloquant), a surveiller."))
+
+    # ---------- 3. URL ----------
+    if url:
+        by_cat = tally(url, "category")
+        by_uaction = tally(url, "action")
+        add("")
+        add(f"[URL] categorie={by_cat} | action={by_uaction}")
+        ublock = [k for k in by_uaction if "block" in k or k in ("deny",)]
+        if ublock:
+            findings.append(("BLOQUE", "Bloque par FILTRAGE URL",
+                             f"categorie(s): {list(by_cat.keys())}, action: {ublock}. "
+                             "-> autoriser la categorie/URL ou whitelister."))
+
+    # ---------- 4. DECRYPTION ----------
+    if decrypt:
+        by_err = tally(decrypt, "error", "err_index")
+        by_daction = tally(decrypt, "action")
+        add("")
+        add(f"[DECRYPTION] erreurs={by_err} | action={by_daction}")
+        derr = [k for k in by_err if k and k != "(vide)"]
+        if derr:
+            findings.append(("PROBLEME", "Echec de DECHIFFREMENT SSL",
+                             f"erreur(s): {derr}. -> certificat non fiable, cipher/version TLS non supporte, "
+                             "ou epingle (pinning). Exclure l'URL du decrypt, ou corriger le certif."))
+
+    # ---------- SYNTHESE ----------
+    add("")
+    add("=" * 60)
+    add(">>> DIAGNOSTIC EXPERT :")
+    if not findings:
+        if traffic:
+            add("    [OK] Aucune anomalie detectee. Le flux semble fonctionner normalement.")
+        else:
+            add("    [?] Pas assez de donnees pour conclure (aucun log).")
+    else:
+        order = {"BLOQUE": 0, "PROBLEME": 1, "SUSPECT": 2, "ATTENTION": 3, "INFO": 4, "OK": 5}
+        for sev, titre, detail in sorted(findings, key=lambda f: order.get(f[0], 9)):
+            add(f"    [{sev}] {titre}")
+            add(f"           {detail}")
+    return R
+
+
+def main():
+    p = argparse.ArgumentParser(description="Diagnostic expert d'un flux (correlation multi-logs Panorama)")
+    p.add_argument("--src")
+    p.add_argument("--dst")
+    p.add_argument("--port")
+    p.add_argument("--proto")
+    p.add_argument("--url", help="Domaine/URL (ajoute le filtre url contains)")
+    p.add_argument("--config")
+    p.add_argument("--dev", action="store_true")
+    p.add_argument("--days", type=int, default=2)
+    p.add_argument("--nlogs", type=int, default=100)
+    p.add_argument("--timeout", type=int, default=300)
+    p.add_argument("--json", dest="json_path")
+    args = p.parse_args()
+
+    config_path = args.config or ("config-dev.json" if args.dev else "config.json")
+    print(f"[INFO] config: {config_path}")
+
+    since = datetime.datetime.now() - datetime.timedelta(days=args.days)
+    since_str = since.strftime("%Y/%m/%d %H:%M:%S")
+
+    q_flow = build_query(args.src, args.dst, args.port, args.proto, since_str)
+    q_url = build_query(args.src, args.dst, None, None, since_str, by_url=args.url) if args.url \
+        else build_query(args.src, args.dst, None, None, since_str)
+
+    # Pour threat/decryption, pas de filtre port.dst (champs parfois absents) -> src/dst
+    q_sec = build_query(args.src, args.dst, None, args.proto, since_str)
+
+    flow = f"{args.src or 'any'} -> {args.dst or args.url or 'any'} {(args.proto or '')}/{(args.port or 'any')}"
+
+    pano = PanoramaClient(config_path)
+    pano.keygen()
+    print(f"[...] Interrogation multi-logs depuis {since_str} (traffic/threat/url/decryption)...")
+
+    specs = [
+        ("traffic", q_flow, "traffic"),
+        ("threat", q_sec, "threat"),
+        ("url", q_url, "url"),
+        ("decryption", q_sec, "decryption"),
+    ]
+    logs = pano.query_logs_parallel(specs, nlogs=args.nlogs, max_wait=args.timeout)
+    # Filtre les resultats en erreur (type de log non dispo sur l'instance)
+    for k, v in list(logs.items()):
+        if isinstance(v, dict) and v.get("_error"):
+            print(f"    [WARN] log '{k}' indisponible: {v['_error']}")
+            logs[k] = []
+
+    report = diagnose(logs, flow)
+    print("\n" + "=" * 60)
+    for line in report:
+        print(line)
+    print("=" * 60)
+
+    if args.json_path:
+        with open(args.json_path, "w", encoding="utf-8") as f:
+            json.dump({"flow": flow, "report": report, "logs": logs}, f, indent=2, ensure_ascii=False)
+        print(f"[OK] Rapport -> {args.json_path}")
+
+
+if __name__ == "__main__":
+    main()

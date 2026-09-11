@@ -190,6 +190,39 @@ class PanoramaClient:
         xml_poll = self._fetch_raw(job_id, max_wait, poll)
         return self._parse_url_entries(xml_poll)
 
+    def query_log(self, query, log_type="traffic", nlogs=50, max_wait=120, poll=1.0):
+        """Requete generique sur n'importe quel type de log (traffic/threat/url/
+        decryption/...). Retourne les entrees avec TOUS leurs champs (tag->valeur)."""
+        job_id = self.submit_log_job(query, nlogs, log_type=log_type)
+        xml = self._fetch_raw(job_id, max_wait, poll)
+        return self._parse_all_fields(xml)
+
+    def query_logs_parallel(self, specs, nlogs=50, max_wait=180, poll=1.0):
+        """Soumet plusieurs requetes (types differents) d'un coup puis poll toutes.
+
+        specs : liste de (label, query, log_type). Retourne {label: [entrees]}.
+        """
+        jobs = [(label, self.submit_log_job(q, nlogs, log_type=lt)) for label, q, lt in specs]
+        out = {}
+        for label, jid in jobs:
+            try:
+                out[label] = self._parse_all_fields(self._fetch_raw(jid, max_wait, poll))
+            except Exception as e:
+                out[label] = {"_error": str(e).splitlines()[0]}
+        return out
+
+    @staticmethod
+    def _parse_all_fields(xml):
+        """Parse chaque <entry> en dict {tag: valeur} (tous les champs feuilles)."""
+        entries = []
+        for body in re.findall(r"<entry[^>]*>(.*?)</entry>", xml, re.S):
+            d = {}
+            for tag, val in re.findall(r"<([\w-]+)>([^<]*)</\1>", body):
+                d[tag] = val.strip()
+            if d:
+                entries.append(d)
+        return entries
+
     def _fetch_raw(self, job_id, max_wait=120, poll=1.0):
         """Poll un job et retourne le XML brut (pour parsers specifiques)."""
         waited = 0.0
