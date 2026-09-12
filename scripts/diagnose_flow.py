@@ -95,6 +95,23 @@ def check_decryption_rules(pano, serial, src, dst):
     return matched
 
 
+def reverse_dns(ip):
+    """PTR (reverse DNS) d'une IP -> hostname, ou '' si echec."""
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except (socket.herror, socket.gaierror, OSError):
+        return ""
+
+
+MS_HINTS = ("microsoft", "msft", "msauth", "windows.net", "azure", "office",
+            "outlook", "msidentity", "aadg", "live.com", "msedge")
+
+
+def looks_microsoft(hostname):
+    h = (hostname or "").lower()
+    return any(k in h for k in MS_HINTS)
+
+
 def resolve_domain(domain):
     """Resout un domaine en liste d'IP (best-effort, stdlib). [] si echec."""
     try:
@@ -186,9 +203,10 @@ def discover(pano, src, port, since_str, nlogs, timeout):
         base.append(f"(port.dst eq {port})")
     q = " and ".join(base)
 
-    # 1. Domaines via logs URL
+    # 1. Domaines via logs URL (best-effort, timeout court : l'info cle vient du
+    #    traffic + reverse DNS ci-dessous ; les logs URL sont souvent lents/absents)
     try:
-        ulogs = pano.query_url_log(q, nlogs=nlogs, max_wait=timeout)
+        ulogs = pano.query_url_log(q, nlogs=min(nlogs, 50), max_wait=min(timeout, 90))
     except Exception as e:
         ulogs = []
         R.append(f"[URL] erreur: {str(e).splitlines()[0]}")
@@ -225,22 +243,32 @@ def discover(pano, src, port, since_str, nlogs, timeout):
                     dd["app"].add(e["app"])
                 if e.get("action"):
                     dd["act"].add(e["action"])
-        R.append(f"[TRAFFIC] {len(dsts)} destination(s) IP (top 15) :")
+        R.append(f"[TRAFFIC] {len(dsts)} destination(s) IP (top 15) - avec reverse DNS :")
         reset_ips = []
+        ms_hosts, other_hosts = set(), set()
         for ip, dd in sorted(dsts.items(), key=lambda kv: -kv[1]["n"])[:15]:
             is_reset = any("reset" in a or a in ("deny", "drop") for a in dd["act"])
-            flag = "  <-- [!] FIREWALL RESET/DENY" if is_reset else ""
-            R.append(f"    {ip:16} {dd['n']:4}  app={sorted(dd['app'])} {sorted(dd['act'])}{flag}")
+            ptr = reverse_dns(ip)
+            host_txt = f" {ptr}" if ptr else " (pas de PTR)"
+            ms = looks_microsoft(ptr)
+            flag = "  <-- [!] RESET/DENY" if is_reset else ""
+            if ms:
+                flag += "  [MICROSOFT]"
+            R.append(f"    {ip:16} {dd['n']:4}  {sorted(dd['act'])}{host_txt}{flag}")
             if is_reset:
                 reset_ips.append(ip)
+                (ms_hosts if ms else other_hosts).add(ptr or ip)
         if reset_ips:
             R.append("")
-            R.append(f">>> [!] {len(reset_ips)} destination(s) COUPEE(S) par le firewall (reset/deny) :")
-            R.append(f"        {', '.join(reset_ips)}")
-            R.append("        reset-both = le firewall termine activement la session -> profil de")
-            R.append("        securite (threat), echec de dechiffrement SSL, ou deny-reset.")
-            R.append("        -> analyser en detail chacune :")
-            R.append(f"           python scripts/diagnose_flow.py --src {src} --dst {reset_ips[0]} --port {port or 443} --proto tcp --serial <fw>")
+            R.append(f">>> [!] {len(reset_ips)} destination(s) COUPEE(S) par le firewall (reset/deny).")
+            if ms_hosts:
+                R.append(f"    [MICROSOFT] hostnames MS reset (a autoriser) : {sorted(ms_hosts)}")
+            if other_hosts:
+                R.append(f"    [AUTRES] hostnames/IP reset : {sorted(other_hosts)}")
+            R.append("    reset-both sur interzone-default = AUCUNE regle n'autorise -> il faut")
+            R.append("    autoriser ces domaines (categorie URL / EDL), pas des IP (cloud = IP changeantes).")
+            R.append("    -> analyser une destination en detail :")
+            R.append(f"       python scripts/diagnose_flow.py --src {src} --dst {reset_ips[0]} --port {port or 443} --proto tcp --serial <fw>")
     else:
         R.append("[TRAFFIC] aucun log traffic pour cette source.")
     return R
