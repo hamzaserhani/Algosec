@@ -132,8 +132,16 @@ def main():
             rd = False
         dest_maybe = rd or r["destination"] == ["any"]
         if rs and rv and dest_maybe:
-            shadow_found = True
-            tag = "  <== BLOCK/DENY (SHADOW PROBABLE)" if r["action"] != "allow" else "  (allow - prend le flux avant)"
+            url_gated = bool(r["category"]) and r["category"] != ["any"]
+            if r["action"] == "allow":
+                tag = "  (allow - prend le flux avant si applicable)"
+            elif url_gated:
+                # deny conditionne a une categorie URL -> ne shadow QUE si le domaine
+                # du flux est dans cette categorie (pas un shadow systematique)
+                tag = f"  (deny CONDITIONNEL a la categorie {r['category']} - shadow seulement si le domaine y est)"
+            else:
+                tag = "  <== BLOCK/DENY inconditionnel (SHADOW PROBABLE)"
+                shadow_found = True
             print(f"     #{i+1} '{r['name']}' action={r['action']} loc={r['loc']} "
                   f"cat={r['category']}{tag}")
 
