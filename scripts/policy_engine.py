@@ -177,6 +177,8 @@ class PolicyEngine:
                     "application": _members(entry, "application"),
                     "category": _members(entry, "category"),
                     "action": (_text(entry, "action") or "").lower(),
+                    "from": _members(entry, "from"),
+                    "to": _members(entry, "to"),
                 })
         return len(self.rules)
 
