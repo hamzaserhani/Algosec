@@ -189,6 +189,23 @@ APP_SUSPECT = {
 }
 
 
+def _query_with_retry(fn, nlogs, timeout, label):
+    """Execute une requete log avec retry degressif sur timeout (charge Panorama variable)."""
+    attempts = [(nlogs, timeout), (max(nlogs // 3, 30), timeout), (20, min(timeout, 120))]
+    last = None
+    for n, t in attempts:
+        try:
+            return fn(n, t)
+        except Exception as e:
+            last = e
+            msg = str(e).splitlines()[0]
+            if "timeout" in msg.lower():
+                print(f"    [{label}] timeout (nlogs={n}) -> retry avec moins de logs...")
+                continue
+            raise
+    raise last if last else Exception(f"{label}: echec requete")
+
+
 def discover(pano, src, port, since_str, nlogs, timeout):
     """Que contacte reellement cette source ? Top domaines (URL) + top destinations (traffic).
 
@@ -206,7 +223,9 @@ def discover(pano, src, port, since_str, nlogs, timeout):
     # 1. Domaines via logs URL (best-effort, timeout court : l'info cle vient du
     #    traffic + reverse DNS ci-dessous ; les logs URL sont souvent lents/absents)
     try:
-        ulogs = pano.query_url_log(q, nlogs=min(nlogs, 50), max_wait=min(timeout, 90))
+        ulogs = _query_with_retry(
+            lambda n, t: pano.query_url_log(q, nlogs=min(n, 50), max_wait=min(t, 90)),
+            nlogs, timeout, "URL")
     except Exception as e:
         ulogs = []
         R.append(f"[URL] erreur: {str(e).splitlines()[0]}")
@@ -226,9 +245,11 @@ def discover(pano, src, port, since_str, nlogs, timeout):
     else:
         R.append("[URL] aucun log URL pour cette source.")
 
-    # 2. Destinations via logs traffic
+    # 2. Destinations via logs traffic (avec retry degressif sur timeout)
     try:
-        tlogs = pano.query_traffic_log(q, nlogs=nlogs, max_wait=timeout)
+        tlogs = _query_with_retry(
+            lambda n, t: pano.query_traffic_log(q, nlogs=n, max_wait=t),
+            nlogs, timeout, "TRAFFIC")
     except Exception as e:
         tlogs = []
         R.append(f"[TRAFFIC] erreur: {str(e).splitlines()[0]}")
