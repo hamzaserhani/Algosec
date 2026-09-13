@@ -206,6 +206,53 @@ def _query_with_retry(fn, nlogs, timeout, label):
     raise last if last else Exception(f"{label}: echec requete")
 
 
+def dump_fields(pano, src, dst, port, proto, since_str, nlogs, timeout):
+    """Dumpe TOUS les champs des logs (traffic/threat/url) du flux, pour reperer
+    un champ contenant un SNI / hostname / url (varie selon la version PAN-OS)."""
+    R = []
+    R.append(f"=== CHAMPS DISPONIBLES dans les logs pour : {src} -> {dst} {proto}/{port} ===")
+    c = [f"(time_generated geq '{since_str}')"]
+    if src:
+        c.append(f"(addr.src in {src})")
+    if dst:
+        c.append(f"(addr.dst in {dst})")
+    if port:
+        c.append(f"(port.dst eq {port})")
+    if proto:
+        c.append(f"(proto eq {proto})")
+    q = " and ".join(c)
+
+    # Champs susceptibles de contenir un domaine/SNI/url
+    HOST_HINTS = ("url", "misc", "sni", "hostname", "host", "domain", "server", "cn", "subject")
+
+    for lt in ("traffic", "threat", "url"):
+        try:
+            entries = pano.query_log(q, log_type=lt, nlogs=min(nlogs, 30), max_wait=min(timeout, 120))
+        except Exception as e:
+            R.append(f"\n[{lt}] erreur: {str(e).splitlines()[0]}")
+            continue
+        if not entries:
+            R.append(f"\n[{lt}] aucune entree.")
+            continue
+        # union des champs + 1 valeur exemple
+        keys = {}
+        for e in entries:
+            for k, v in e.items():
+                if v and k not in keys:
+                    keys[k] = v
+        R.append(f"\n[{lt}] {len(entries)} entree(s), {len(keys)} champ(s) :")
+        # d'abord les champs "interessants" (hostname/url/sni)
+        interesting = [k for k in keys if any(h in k.lower() for h in HOST_HINTS)]
+        if interesting:
+            R.append("   >>> Champs pouvant contenir un DOMAINE/SNI :")
+            for k in interesting:
+                R.append(f"        {k} = {keys[k][:60]}")
+        R.append("   Tous les champs (echantillon) :")
+        for k in sorted(keys):
+            R.append(f"        {k:22} = {str(keys[k])[:50]}")
+    return R
+
+
 def discover(pano, src, port, since_str, nlogs, timeout):
     """Que contacte reellement cette source ? Top domaines (URL) + top destinations (traffic).
 
@@ -597,6 +644,7 @@ def main():
     p.add_argument("--serial", help="Serial OU hostname du firewall (resolu vers un serial vivant, utile pour Cloud NGFW autoscale) : verifie les regles de DECRYPTION")
     p.add_argument("--vs-src", dest="vs_src", help="2e source a COMPARER pour le meme --url (ex: 'ca marche depuis A, pas depuis B')")
     p.add_argument("--discover", action="store_true", help="Lister ce que --src contacte reellement (domaines URL + destinations IP)")
+    p.add_argument("--fields", action="store_true", help="Dumper TOUS les champs des logs du flux (reperer un SNI/hostname/url)")
     p.add_argument("--config")
     p.add_argument("--dev", action="store_true")
     p.add_argument("--days", type=int, default=2)
@@ -616,6 +664,19 @@ def main():
     pano = PanoramaClient(config_path)
     pano.keygen()
     print(f"[...] Interrogation multi-logs depuis {since_str}...")
+
+    # Mode CHAMPS : dumper tous les champs des logs (reperer un SNI/hostname)
+    if args.fields:
+        report = dump_fields(pano, args.src, args.dst, args.port, args.proto,
+                             since_str, args.nlogs, args.timeout)
+        print("\n" + "=" * 64)
+        for line in report:
+            print(line)
+        print("=" * 64)
+        if args.json_path:
+            with open(args.json_path, "w", encoding="utf-8") as f:
+                json.dump({"report": report}, f, indent=2, ensure_ascii=False)
+        return
 
     # Mode DECOUVERTE : que contacte cette source ?
     if args.discover:
