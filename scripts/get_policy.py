@@ -62,6 +62,8 @@ def main():
     parser.add_argument("--running", help="Serial du firewall : dump la policy EFFECTIVE (show running security-policy)")
     parser.add_argument("--pushed", help="Serial du firewall : dump la policy poussee en XML (show config pushed-shared-policy)")
     parser.add_argument("--sample-rule", action="store_true", help="Affiche 1 exemple de regle shared pre-rulebase (leger)")
+    parser.add_argument("--url-category", help="Dump les membres d'une categorie URL custom (ex: CALM_SAP_URLs)")
+    parser.add_argument("--dg-name", help="Device-group ou chercher la categorie URL (sinon shared)")
     parser.add_argument("--fw-rules", help="Serial : localise les regles effectives du firewall (pushed pre/post + local)")
     parser.add_argument("--app-info", help="Nom d'application : dump sa definition (ports par defaut)")
     parser.add_argument("--serial", help="Serial (pour --app-info/--locate via target)")
@@ -174,6 +176,29 @@ def main():
             print(f"\n--- Exemple de regle ({best[0]}) ---")
             m = re.search(r"(<entry\b.*?</entry>)", best[1], re.S)
             print(m.group(1)[:1500] if m else "(?)")
+        return
+
+    if args.url_category:
+        name = args.url_category
+        # Emplacements possibles d'une categorie URL custom (shared / device-group)
+        paths = [("shared", f"/config/shared/profiles/custom-url-category/entry[@name='{name}']")]
+        if args.dg_name:
+            paths.insert(0, (f"DG {args.dg_name}",
+                f"/config/devices/entry[@name='{DEV}']/device-group/entry[@name='{args.dg_name}']"
+                f"/profiles/custom-url-category/entry[@name='{name}']"))
+        for label, xpath in paths:
+            xml = pano.get_config(xpath)
+            if not re.search(r"<entry\b", xml):
+                print(f"  [{label}] categorie '{name}' absente.")
+                continue
+            members = re.findall(r"<member[^>]*>(.*?)</member>", xml, re.S)
+            typ = re.search(r"<type>(.*?)</type>", xml)
+            print(f"[{label}] categorie URL custom '{name}'"
+                  + (f" (type={typ.group(1)})" if typ else "") + f" : {len(members)} entree(s)")
+            for m in members:
+                print(f"    {m.strip()}")
+            return
+        print(f"Categorie '{name}' introuvable (essaye --dg-name <device-group>).")
         return
 
     if args.sample_rule:
