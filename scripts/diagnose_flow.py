@@ -69,45 +69,61 @@ def check_routing(pano, serial, src, dst, port, since_str, nlogs, timeout):
     src_ip = (src or "").split("/")[0]
     R.append(f"[ROUTAGE {serial}] symetrie ALLER/RETOUR (lecture seule)")
 
-    # 1. Interfaces observees dans les logs (inbound/outbound)
+    # 1. Interfaces observees dans les logs (requete GENERIQUE : capture tous les champs)
     in_if = out_if = None
     try:
         q = f"(time_generated geq '{since_str}') and (addr.src in {src}) and (addr.dst in {dst})"
-        tl = pano.query_traffic_log(q, nlogs=min(nlogs, 10), max_wait=min(timeout, 120))
-        if tl:
-            in_if = tl[0].get("inbound_if") or tl[0].get("from")
-            out_if = tl[0].get("outbound_if") or tl[0].get("to")
-            R.append(f"    Logs : entree={in_if}  sortie={out_if}")
+        tl = pano.query_log(q, log_type="traffic", nlogs=min(nlogs, 10), max_wait=min(timeout, 120))
+        # prend la 1ere entree qui a une interface renseignee
+        for e in tl:
+            if e.get("inbound_if") or e.get("outbound_if"):
+                in_if = e.get("inbound_if")
+                out_if = e.get("outbound_if")
+                break
+        R.append(f"    Logs : entree={in_if or '?'}  sortie={out_if or '?'}")
     except Exception as e:
         R.append(f"    [logs interfaces] {str(e).splitlines()[0]}")
 
-    # 2. Virtual-routers (config) + interface -> VR
-    vrs = {}
+    # 2. Virtual-routers : via 'show routing summary' (op) - plus fiable que la config
+    #    (les VR peuvent etre pousses par template). Fallback: VR de l'interface.
+    target_vrs = []
     try:
-        xml = pano.get_config_target(
-            "/config/devices/entry[@name='localhost.localdomain']/network/virtual-router", serial)
-        for name, body in _re.findall(r'<entry\s+name="([^"]+)">(.*?)</entry>', xml, _re.S):
-            members = _re.findall(r"<member>(.*?)</member>", body)
-            vrs[name] = members
-    except Exception as e:
-        R.append(f"    [virtual-routers] {str(e).splitlines()[0]}")
-
-    # VR contenant l'interface d'entree, sinon tous
-    target_vrs = [vr for vr, ifs in vrs.items() if in_if and any(in_if in m for m in ifs)] or list(vrs) or [None]
+        xml = pano._op("<show><routing><summary></summary></routing></show>", target=serial)
+        target_vrs = list(dict.fromkeys(_re.findall(r"<virtual-router>(.*?)</virtual-router>", xml)))
+        target_vrs = [v.strip() for v in target_vrs if v.strip()]
+    except Exception:
+        pass
+    if not target_vrs and in_if:
+        # VR de l'interface d'entree via 'show interface'
+        try:
+            xml = pano._op(f"<show><interface>{in_if}</interface></show>", target=serial)
+            m = _re.search(r"<(?:vr|virtual-router|fwd)>(?:vr:)?(.*?)</(?:vr|virtual-router|fwd)>", xml)
+            if m:
+                target_vrs = [m.group(1).strip()]
+        except Exception:
+            pass
+    if not target_vrs:
+        target_vrs = [None]
 
     def fib(vr, ip):
-        vr_xml = f"<virtual-router>{vr}</virtual-router>" if vr else ""
-        cmd = f"<test><routing><fib-lookup>{vr_xml}<ip>{ip}</ip></fib-lookup></routing></test>"
+        if not vr:
+            return "VR inconnu (impossible sans virtual-router)"
+        cmd = (f"<test><routing><fib-lookup><virtual-router>{vr}</virtual-router>"
+               f"<ip>{ip}</ip></fib-lookup></routing></test>")
         try:
             x = pano._op(cmd, target=serial)
         except Exception as e:
             return f"erreur: {str(e).splitlines()[0]}"
         iface = _re.search(r"<interface>(.*?)</interface>", x)
-        nh = _re.search(r"<nh>(.*?)</nh>", x) or _re.search(r"<nexthop>(.*?)</nexthop>", x)
-        dm = _re.search(r"<dm>(.*?)</dm>", x)  # dtype
+        nh = (_re.search(r"<nh>(.*?)</nh>", x) or _re.search(r"<nexthop>(.*?)</nexthop>", x)
+              or _re.search(r"<via>(.*?)</via>", x))
+        dtype = _re.search(r"<dtype>(.*?)</dtype>", x) or _re.search(r"<dm>(.*?)</dm>", x)
+        if not iface and "error" in x.lower():
+            msg = _re.search(r"<msg>(.*?)</msg>", x, _re.S)
+            return f"pas de route / erreur: {(msg.group(1).strip()[:80]) if msg else x[:80]}"
         return (f"iface={iface.group(1) if iface else '?'} "
-                f"nexthop={nh.group(1) if nh else '?'}"
-                + (f" ({dm.group(1)})" if dm else ""))
+                f"nexthop={nh.group(1) if nh else '(direct)'}"
+                + (f" [{dtype.group(1)}]" if dtype else ""))
 
     for vr in target_vrs:
         R.append(f"    VR '{vr or '(defaut)'}' :")
