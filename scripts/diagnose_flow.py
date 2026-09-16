@@ -60,6 +60,53 @@ def resolve_serial(pano, value):
     return value
 
 
+def check_firewalls_path(pano, src, dst, port, since_str, nlogs, timeout):
+    """Quels firewalls voient l'ALLER (src->dst) vs le RETOUR (dst->src) ?
+    Si ce sont des firewalls DIFFERENTS -> asymetrie inter-firewalls confirmee."""
+    R = []
+    R.append("[FIREWALLS DU CHEMIN] aller vs retour (via device_name des logs)")
+
+    def fw_dist(s, d, label):
+        q = f"(time_generated geq '{since_str}') and (addr.src in {s}) and (addr.dst in {d})"
+        if port:
+            q += f" and (port.dst eq {port})"
+        try:
+            logs = pano.query_log(q, log_type="traffic", nlogs=min(nlogs, 50), max_wait=min(timeout, 150))
+        except Exception as e:
+            R.append(f"    {label}: erreur {str(e).splitlines()[0]}")
+            return set()
+        dist = {}
+        for e in logs:
+            fw = e.get("device_name") or e.get("serial") or "?"
+            d0 = dist.setdefault(fw, {"n": 0, "act": set()})
+            d0["n"] += 1
+            if e.get("action"):
+                d0["act"].add(e["action"])
+        if not dist:
+            R.append(f"    {label}: aucun log.")
+        for fw, dd in sorted(dist.items(), key=lambda kv: -kv[1]["n"]):
+            R.append(f"    {label}: {fw}  ({dd['n']} logs, actions={sorted(dd['act'])})")
+        return set(dist)
+
+    fw_fwd = fw_dist(src, dst, "ALLER  src->dst")
+    fw_ret = fw_dist(dst, src, "RETOUR dst->src")
+    R.append("")
+    if fw_fwd and fw_ret:
+        if fw_fwd == fw_ret:
+            R.append(f"    >>> Meme(s) firewall(s) sur les 2 sens : {sorted(fw_fwd)} "
+                     "-> pas d'asymetrie INTER-firewalls (chercher au niveau interface/routage interne).")
+        else:
+            R.append(f"    >>> ASYMETRIE INTER-FIREWALLS : aller vu par {sorted(fw_fwd)}, "
+                     f"retour par {sorted(fw_ret)}.")
+            R.append("        Les 2 sens empruntent des firewalls DIFFERENTS -> chacun ne voit qu'une")
+            R.append("        direction -> drop du trafic hors-SYN. FIX: forcer les 2 sens par le meme")
+            R.append("        firewall (routage/UDR Azure + routes on-prem symetriques).")
+    elif fw_fwd and not fw_ret:
+        R.append(f"    >>> L'ALLER est vu ({sorted(fw_fwd)}) mais AUCUN log pour le RETOUR sur ce firewall")
+        R.append("        -> le retour ne repasse probablement PAS par ce(s) firewall(s) = asymetrie.")
+    return R
+
+
 def check_routing(pano, serial, src, dst, port, since_str, nlogs, timeout):
     """Verifie la symetrie du routage ALLER (vers serveur) / RETOUR (vers client)
     cote firewall : virtual-router, fib-lookup des 2 sens, interfaces vs logs.
@@ -977,7 +1024,7 @@ def main():
                                            args.port or 445)
         except Exception as e:
             report.append(f"    [WARN] verif firewall tcp echouee: {str(e).splitlines()[0]}")
-        # Verification routage aller/retour (fib-lookup) si demandee
+        # Verification routage aller/retour (fib-lookup) + firewalls du chemin
         if args.check_routing:
             report.append("")
             try:
@@ -985,6 +1032,12 @@ def main():
                                         args.port or 445, since_str, args.nlogs, args.timeout)
             except Exception as e:
                 report.append(f"    [WARN] check-routing echoue: {str(e).splitlines()[0]}")
+            report.append("")
+            try:
+                report += check_firewalls_path(pano, args.src or "", args.dst,
+                                               args.port, since_str, args.nlogs, args.timeout)
+            except Exception as e:
+                report.append(f"    [WARN] firewalls-path echoue: {str(e).splitlines()[0]}")
 
     print("\n" + "=" * 60)
     for line in report:
