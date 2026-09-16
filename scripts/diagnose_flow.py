@@ -60,6 +60,70 @@ def resolve_serial(pano, value):
     return value
 
 
+def check_routing(pano, serial, src, dst, port, since_str, nlogs, timeout):
+    """Verifie la symetrie du routage ALLER (vers serveur) / RETOUR (vers client)
+    cote firewall : virtual-router, fib-lookup des 2 sens, interfaces vs logs.
+    Lecture seule."""
+    import re as _re
+    R = []
+    src_ip = (src or "").split("/")[0]
+    R.append(f"[ROUTAGE {serial}] symetrie ALLER/RETOUR (lecture seule)")
+
+    # 1. Interfaces observees dans les logs (inbound/outbound)
+    in_if = out_if = None
+    try:
+        q = f"(time_generated geq '{since_str}') and (addr.src in {src}) and (addr.dst in {dst})"
+        tl = pano.query_traffic_log(q, nlogs=min(nlogs, 10), max_wait=min(timeout, 120))
+        if tl:
+            in_if = tl[0].get("inbound_if") or tl[0].get("from")
+            out_if = tl[0].get("outbound_if") or tl[0].get("to")
+            R.append(f"    Logs : entree={in_if}  sortie={out_if}")
+    except Exception as e:
+        R.append(f"    [logs interfaces] {str(e).splitlines()[0]}")
+
+    # 2. Virtual-routers (config) + interface -> VR
+    vrs = {}
+    try:
+        xml = pano.get_config_target(
+            "/config/devices/entry[@name='localhost.localdomain']/network/virtual-router", serial)
+        for name, body in _re.findall(r'<entry\s+name="([^"]+)">(.*?)</entry>', xml, _re.S):
+            members = _re.findall(r"<member>(.*?)</member>", body)
+            vrs[name] = members
+    except Exception as e:
+        R.append(f"    [virtual-routers] {str(e).splitlines()[0]}")
+
+    # VR contenant l'interface d'entree, sinon tous
+    target_vrs = [vr for vr, ifs in vrs.items() if in_if and any(in_if in m for m in ifs)] or list(vrs) or [None]
+
+    def fib(vr, ip):
+        vr_xml = f"<virtual-router>{vr}</virtual-router>" if vr else ""
+        cmd = f"<test><routing><fib-lookup>{vr_xml}<ip>{ip}</ip></fib-lookup></routing></test>"
+        try:
+            x = pano._op(cmd, target=serial)
+        except Exception as e:
+            return f"erreur: {str(e).splitlines()[0]}"
+        iface = _re.search(r"<interface>(.*?)</interface>", x)
+        nh = _re.search(r"<nh>(.*?)</nh>", x) or _re.search(r"<nexthop>(.*?)</nexthop>", x)
+        dm = _re.search(r"<dm>(.*?)</dm>", x)  # dtype
+        return (f"iface={iface.group(1) if iface else '?'} "
+                f"nexthop={nh.group(1) if nh else '?'}"
+                + (f" ({dm.group(1)})" if dm else ""))
+
+    for vr in target_vrs:
+        R.append(f"    VR '{vr or '(defaut)'}' :")
+        fwd = fib(vr, dst)     # aller : vers le serveur
+        ret = fib(vr, src_ip)  # retour : vers le client
+        R.append(f"        ALLER  vers serveur {dst:16} -> {fwd}")
+        R.append(f"        RETOUR vers client  {src_ip:16} -> {ret}")
+
+    # 3. Verdict indicatif
+    R.append("    >>> A COMPARER : l'interface de RETOUR (vers le client) doit correspondre")
+    R.append("        a l'interface d'ENTREE du flux aller. Si differente, ou si le SERVEUR")
+    R.append("        renvoie hors firewall (sa passerelle != ce FW), le retour ne repasse pas")
+    R.append("        par ici -> asymetrie. Confirmer avec un traceroute dans LES DEUX sens.")
+    return R
+
+
 def confirm_firewall_tcp(pano, serial, src, dst, port):
     """Confirme un routage asymetrique cote firewall (op commands, lecture seule) :
     reglage tcp asymmetric-path + compteurs d'asymetrie + sessions actives du flux."""
@@ -746,6 +810,8 @@ def main():
     p.add_argument("--proto")
     p.add_argument("--url", help="Domaine/URL (ajoute le filtre url contains)")
     p.add_argument("--serial", help="Serial OU hostname du firewall (resolu vers un serial vivant, utile pour Cloud NGFW autoscale) : verifie les regles de DECRYPTION")
+    p.add_argument("--check-routing", dest="check_routing", action="store_true",
+                   help="Verifie la symetrie du routage aller/retour (fib-lookup) - necessite --serial + --dst")
     p.add_argument("--vs-src", dest="vs_src", help="2e source a COMPARER pour le meme --url (ex: 'ca marche depuis A, pas depuis B')")
     p.add_argument("--discover", action="store_true", help="Lister ce que --src contacte reellement (domaines URL + destinations IP)")
     p.add_argument("--fields", action="store_true", help="Dumper TOUS les champs des logs du flux (reperer un SNI/hostname/url)")
@@ -895,6 +961,14 @@ def main():
                                            args.port or 445)
         except Exception as e:
             report.append(f"    [WARN] verif firewall tcp echouee: {str(e).splitlines()[0]}")
+        # Verification routage aller/retour (fib-lookup) si demandee
+        if args.check_routing:
+            report.append("")
+            try:
+                report += check_routing(pano, serial, args.src or "", args.dst,
+                                        args.port or 445, since_str, args.nlogs, args.timeout)
+            except Exception as e:
+                report.append(f"    [WARN] check-routing echoue: {str(e).splitlines()[0]}")
 
     print("\n" + "=" * 60)
     for line in report:
