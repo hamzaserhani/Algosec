@@ -60,6 +60,61 @@ def resolve_serial(pano, value):
     return value
 
 
+def confirm_firewall_tcp(pano, serial, src, dst, port):
+    """Confirme un routage asymetrique cote firewall (op commands, lecture seule) :
+    reglage tcp asymmetric-path + compteurs d'asymetrie + sessions actives du flux."""
+    import re as _re
+    R = []
+    R.append(f"[VERIF FIREWALL {serial}] (lecture seule)")
+
+    # 1. Reglage tcp asymmetric-path
+    try:
+        xml = pano.get_config_target(
+            "/config/devices/entry[@name='localhost.localdomain']/deviceconfig/setting/tcp", serial)
+        m = _re.search(r"<asymmetric-path>(.*?)</asymmetric-path>", xml)
+        val = m.group(1).strip() if m else "drop (defaut)"
+        R.append(f"    tcp asymmetric-path = {val}"
+                 + ("  -> le firewall DROP les sessions asymetriques (explique incomplete/reset)"
+                    if "drop" in val.lower() else "  -> bypass (asymetrie toleree)"))
+    except Exception as e:
+        R.append(f"    [reglage tcp] erreur: {str(e).splitlines()[0]}")
+
+    # 2. Compteurs globaux d'asymetrie (delta)
+    try:
+        xml = pano._op("<show><counter><global><filter><delta>yes</delta>"
+                       "<packet-filter>no</packet-filter></filter></global></counter></show>", target=serial)
+        hits = []
+        for name, value in _re.findall(r"<name>(.*?)</name>.*?<value>(\d+)</value>", xml, _re.S):
+            nl = name.lower()
+            if any(k in nl for k in ("asym", "out_of_sync", "non_syn", "reject_non_syn",
+                                     "drop_out_of_wnd", "tcp_drop")) and int(value) > 0:
+                hits.append((name, value))
+        if hits:
+            R.append("    Compteurs d'asymetrie (delta > 0) :")
+            for name, value in hits[:8]:
+                R.append(f"        {name} = {value}")
+        else:
+            R.append("    Compteurs d'asymetrie : aucun increment (relancer pendant que le flux tente).")
+    except Exception as e:
+        R.append(f"    [compteurs] erreur: {str(e).splitlines()[0]}")
+
+    # 3. Sessions actives du flux
+    try:
+        cmd = ("<show><session><all><filter>"
+               f"<source>{src.split('/')[0]}</source><destination>{dst}</destination>"
+               f"<destination-port>{port}</destination-port>"
+               "</filter></all></session></show>")
+        xml = pano._op(cmd, target=serial)
+        nsess = len(_re.findall(r"<entry", xml))
+        states = _re.findall(r"<state>(.*?)</state>", xml)
+        R.append(f"    Sessions actives matchant le flux : {nsess}"
+                 + (f" (etats: {sorted(set(states))})" if states else ""))
+    except Exception as e:
+        R.append(f"    [sessions] erreur: {str(e).splitlines()[0]}")
+
+    return R
+
+
 def check_decryption_rules(pano, serial, src, dst):
     """Verifie si le flux src->dst est pris par une regle de DECHIFFREMENT.
 
@@ -816,6 +871,16 @@ def main():
                     report.append("               FIX: passer ce flux en 'no-decrypt', ou installer la CA dans SAP.")
         except Exception as e:
             report.append(f"    [WARN] lecture decryption-rulebase echouee: {str(e).splitlines()[0]}")
+
+    # Confirmation ROUTAGE ASYMETRIQUE / TCP cote firewall (si --serial + dst)
+    if args.serial and args.dst:
+        serial = resolve_serial(pano, args.serial)
+        report.append("")
+        try:
+            report += confirm_firewall_tcp(pano, serial, args.src or "", args.dst,
+                                           args.port or 445)
+        except Exception as e:
+            report.append(f"    [WARN] verif firewall tcp echouee: {str(e).splitlines()[0]}")
 
     print("\n" + "=" * 60)
     for line in report:
