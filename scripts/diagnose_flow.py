@@ -533,10 +533,35 @@ def diagnose(logs_by_type, flow):
             findings.append(("PARTIEL", "Mix allow/deny",
                              f"allow={allow}, deny={deny} -> depend de la regle qui matche (port/source variable)."))
 
-        # apps suspectes
-        for app, expl in APP_SUSPECT.items():
-            if app in by_app:
-                findings.append(("SUSPECT", f"App '{app}' detectee", expl))
+        # --- Routage ASYMETRIQUE : le firewall ne voit qu'une direction du flux ---
+        # Signature : app=incomplete/insufficient-data massif + MELANGE de raisons
+        # de fin (rst-client ET rst-server, aged-out) + peu d'octets. Cause
+        # datacenter frequente (retour du trafic hors firewall).
+        incomplete = by_app.get("incomplete", 0) + by_app.get("insufficient-data", 0)
+        rst_c = by_ser.get("tcp-rst-from-client", 0)
+        rst_s = by_ser.get("tcp-rst-from-server", 0)
+        aged = by_ser.get("aged-out", 0)
+        total_sessions = sum(by_action.values())
+        mixed_ends = sum(1 for x in (rst_c, rst_s, aged) if x > 0) >= 2
+        if allow and total_sessions and incomplete >= 0.5 * total_sessions and mixed_ends:
+            findings.append(("PROBLEME",
+                f"Probable ROUTAGE ASYMETRIQUE ({incomplete}/{total_sessions} app=incomplete, "
+                f"fins melangees rst-client={rst_c}/rst-server={rst_s}/aged-out={aged})",
+                "le firewall autorise mais ne voit qu'UNE direction du flux (aller sans retour, "
+                "ou l'inverse) -> App-ID ne se complete jamais (incomplete), sessions coupees/expirees "
+                "des 2 cotes. Cause datacenter frequente (retour du trafic empruntant un autre chemin "
+                "que le firewall). VERIFIER : routage/PBF symetrique, interfaces in/out, "
+                "reglage 'tcp asymmetric-path' (drop/bypass), session offload. Ce n'est PAS un simple "
+                "refus serveur ni un blocage policy."))
+            asym = True
+        else:
+            asym = False
+
+        # apps suspectes (si deja explique par l'asymetrie, on n'ajoute pas de doublon)
+        if not asym:
+            for app, expl in APP_SUSPECT.items():
+                if app in by_app:
+                    findings.append(("SUSPECT", f"App '{app}' detectee", expl))
 
         # session-end-reason (policy-deny deja traite ci-dessus -> on l'exclut)
         for reason, cnt in by_ser.items():
