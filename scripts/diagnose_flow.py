@@ -61,14 +61,21 @@ def resolve_serial(pano, value):
 
 
 def check_firewalls_path(pano, src, dst, port, since_str, nlogs, timeout):
-    """Quels firewalls voient l'ALLER (src->dst) vs le RETOUR (dst->src) ?
-    Si ce sont des firewalls DIFFERENTS -> asymetrie inter-firewalls confirmee."""
-    R = []
-    R.append("[FIREWALLS DU CHEMIN] aller vs retour (via device_name des logs)")
+    """VENTILATION du flux par firewall (device_name des logs).
 
-    def fw_dist(s, d, label):
+    ATTENTION a l'interpretation : PAN-OS logge une session BIDIRECTIONNELLE une
+    seule fois, du cote de l'INITIATEUR (src->dst). Une requete "retour" dst->src
+    ne retrouve donc PAS les paquets retour de la meme session : elle ne trouve que
+    des sessions ou le serveur INITIE vers le client. => l'absence de log "retour"
+    est NORMALE et ne prouve RIEN. La vraie preuve d'asymetrie inter-firewalls est :
+      (a) le meme flux src->dst apparait sur PLUSIEURS firewalls (load-balance des sens), ou
+      (b) le compteur flow_tcp_non_syn_drop monte cote firewall (--check-routing / confirm)."""
+    R = []
+    R.append("[FIREWALLS DU CHEMIN] ventilation du flux src->dst par firewall")
+
+    def fw_dist(s, d, label, with_port):
         q = f"(time_generated geq '{since_str}') and (addr.src in {s}) and (addr.dst in {d})"
-        if port:
+        if with_port and port:
             q += f" and (port.dst eq {port})"
         try:
             logs = pano.query_log(q, log_type="traffic", nlogs=min(nlogs, 50), max_wait=min(timeout, 150))
@@ -88,22 +95,26 @@ def check_firewalls_path(pano, src, dst, port, since_str, nlogs, timeout):
             R.append(f"    {label}: {fw}  ({dd['n']} logs, actions={sorted(dd['act'])})")
         return set(dist)
 
-    fw_fwd = fw_dist(src, dst, "ALLER  src->dst")
-    fw_ret = fw_dist(dst, src, "RETOUR dst->src")
+    # Sens initiateur (le seul fiable) : quel(s) firewall(s) voient src->dst:port.
+    fw_fwd = fw_dist(src, dst, "src->dst (initiateur)", True)
+    # Sessions serveur-initie (rare) : informatif seulement, PAS le retour de session.
+    fw_srv = fw_dist(dst, src, "dst->src (serveur initie, info)", False)
     R.append("")
-    if fw_fwd and fw_ret:
-        if fw_fwd == fw_ret:
-            R.append(f"    >>> Meme(s) firewall(s) sur les 2 sens : {sorted(fw_fwd)} "
-                     "-> pas d'asymetrie INTER-firewalls (chercher au niveau interface/routage interne).")
-        else:
-            R.append(f"    >>> ASYMETRIE INTER-FIREWALLS : aller vu par {sorted(fw_fwd)}, "
-                     f"retour par {sorted(fw_ret)}.")
-            R.append("        Les 2 sens empruntent des firewalls DIFFERENTS -> chacun ne voit qu'une")
-            R.append("        direction -> drop du trafic hors-SYN. FIX: forcer les 2 sens par le meme")
-            R.append("        firewall (routage/UDR Azure + routes on-prem symetriques).")
-    elif fw_fwd and not fw_ret:
-        R.append(f"    >>> L'ALLER est vu ({sorted(fw_fwd)}) mais AUCUN log pour le RETOUR sur ce firewall")
-        R.append("        -> le retour ne repasse probablement PAS par ce(s) firewall(s) = asymetrie.")
+    if len(fw_fwd) >= 2:
+        R.append(f"    >>> Le MEME flux src->dst est vu par PLUSIEURS firewalls : {sorted(fw_fwd)}")
+        R.append("        -> les sens du flux sont ventiles sur des firewalls DIFFERENTS : chacun ne")
+        R.append("        voit qu'une partie -> paquets hors-SYN droppes. FIX: forcer les 2 sens par")
+        R.append("        le meme firewall (routage/UDR Azure + routes on-prem symetriques).")
+    elif fw_fwd:
+        R.append(f"    >>> Flux src->dst vu par un seul firewall dans les logs : {sorted(fw_fwd)}.")
+        R.append("        NB: l'absence de log 'retour' est NORMALE (PAN-OS logge la session une")
+        R.append("        seule fois cote initiateur) -> ne pas en conclure d'asymetrie. La preuve")
+        R.append("        fiable est le compteur flow_tcp_non_syn_drop (voir --check-routing / confirm).")
+    else:
+        R.append("    >>> Aucun log src->dst sur la fenetre -> flux absent de ce Panorama, ou")
+        R.append("        ce firewall ne voit pas l'initiation (elle passe par un autre firewall).")
+    if fw_srv:
+        R.append(f"    (info) sessions serveur-initie dst->src vues par : {sorted(fw_srv)} — hors scope du diagnostic.")
     return R
 
 
@@ -697,10 +708,24 @@ def diagnose(logs_by_type, flow):
         allow = sum(v for k, v in by_action.items() if k == "allow")
         reset = sum(v for k, v in by_action.items() if "reset" in str(k))
         deny = sum(v for k, v in by_action.items() if k and k != "allow" and k != "(vide)")
-        # Indices pour distinguer deny explicite vs reset par profil
-        is_policy_deny = "policy-deny" in [str(k).lower() for k in by_ser]
+        total_sessions = sum(by_action.values())
+        # Indices pour distinguer deny explicite vs reset par profil.
+        # On exige une FRACTION significative de policy-deny : quelques policy-deny
+        # noyes dans un flux majoritairement allow (ex: 2/100) ne sont PAS le probleme
+        # principal -> sinon on titre a tort [BLOQUE].
+        n_policy_deny = sum(v for k, v in by_ser.items() if "policy-deny" in str(k).lower())
+        deny_frac = (n_policy_deny / total_sessions) if total_sessions else 0
+        is_policy_deny = n_policy_deny > 0 and (deny_frac >= 0.30 or not allow)
         rules = [str(r) for r in by_rule]
         is_default_rule = any(("default" in r.lower()) for r in rules)  # interzone-default/intrazone-default
+
+        # policy-deny minoritaire noye dans de l'allow -> note d'info, pas un BLOQUE
+        if n_policy_deny > 0 and not is_policy_deny:
+            findings.append(("INFO",
+                f"{n_policy_deny}/{total_sessions} session(s) en policy-deny (minoritaire)",
+                "quelques sessions refusees par la policy, mais le flux est majoritairement "
+                "autorise -> ce n'est pas le blocage principal (souvent une IP/port hors scope "
+                "de la regle, ou un scan). Voir plus bas la vraie cause."))
 
         if (deny or reset) and is_policy_deny:
             # session-end = policy-deny -> c'est un DENY de policy (le reset-both n'est
@@ -716,9 +741,11 @@ def diagnose(logs_by_type, flow):
             else:
                 findings.append(("BLOQUE", f"Bloque par la policy (deny) - regle '{', '.join(rules)}'",
                     "refus explicite par cette regle. Corriger la regle ou creer une autorisation."))
-        elif reset:
-            # reset sans policy-deny -> vraie piste profil de securite / decrypt
-            findings.append(("PROBLEME", f"Firewall RESET la session ({reset} sessions, action reset-*)",
+        elif reset - n_policy_deny > 0:
+            # reset NON explique par un policy-deny (le reset-both d'un deny n'est que
+            # la mecanique du refus) -> vraie piste profil de securite / decrypt
+            genuine_reset = reset - n_policy_deny
+            findings.append(("PROBLEME", f"Firewall RESET la session ({genuine_reset} sessions, action reset-*)",
                              "le firewall a etabli puis COUPE activement la connexion sans deny de policy "
                              "explicite -> profil de securite (THREAT) ou echec de DECHIFFREMENT SSL. "
                              "-> voir logs THREAT et DECRYPTION ci-dessous."))
@@ -730,25 +757,44 @@ def diagnose(logs_by_type, flow):
                              f"allow={allow}, deny={deny} -> depend de la regle qui matche (port/source variable)."))
 
         # --- Routage ASYMETRIQUE : le firewall ne voit qu'une direction du flux ---
-        # Signature : app=incomplete/insufficient-data massif + MELANGE de raisons
-        # de fin (rst-client ET rst-server, aged-out) + peu d'octets. Cause
-        # datacenter frequente (retour du trafic hors firewall).
+        # Signature : le firewall AUTORISE mais les sessions ne s'etablissent jamais
+        # proprement. Symptomes cumulables (aucun n'est requis seul) :
+        #   - app=incomplete/insufficient-data (App-ID ne se complete pas : pas de retour),
+        #   - session-end aged-out (jamais de FIN/RST propre : le retour manque),
+        #   - MELANGE de fins rst-client / rst-server (les 2 bouts coupent).
+        # On combine ces signaux en une fraction "stalled". Une seule direction vue
+        # => beaucoup de aged-out + incomplete meme s'il y a peu de RST.
         incomplete = by_app.get("incomplete", 0) + by_app.get("insufficient-data", 0)
         rst_c = by_ser.get("tcp-rst-from-client", 0)
         rst_s = by_ser.get("tcp-rst-from-server", 0)
         aged = by_ser.get("aged-out", 0)
-        total_sessions = sum(by_action.values())
+        # Sessions "non abouties" : App-ID incomplet OU expiration (aged-out).
+        stalled = max(incomplete, 0) + aged
+        stalled_frac = (stalled / total_sessions) if total_sessions else 0
+        # fins anormales (aged-out ou RST d'un cote) vs fin propre tcp-fin
+        abnormal_ends = aged + rst_c + rst_s
         mixed_ends = sum(1 for x in (rst_c, rst_s, aged) if x > 0) >= 2
-        if allow and total_sessions and incomplete >= 0.5 * total_sessions and mixed_ends:
+        # Asymetrie probable si le flux est autorise ET majoritairement "stalled"
+        # (>=40%), OU si App-ID reste incomplet sur une part notable avec des fins
+        # anormales des deux cotes. Plus permissif que l'ancien seuil 50% + 2 RST.
+        asym_signal = (
+            allow and total_sessions and (
+                stalled_frac >= 0.40
+                or (incomplete >= 0.25 * total_sessions and mixed_ends)
+                or (aged >= 0.40 * total_sessions and abnormal_ends >= 0.5 * total_sessions)
+            )
+        )
+        if asym_signal:
             findings.append(("PROBLEME",
-                f"Probable ROUTAGE ASYMETRIQUE ({incomplete}/{total_sessions} app=incomplete, "
-                f"fins melangees rst-client={rst_c}/rst-server={rst_s}/aged-out={aged})",
+                f"Probable ROUTAGE ASYMETRIQUE ({stalled}/{total_sessions} sessions non abouties : "
+                f"incomplete={incomplete}, aged-out={aged}, rst-client={rst_c}, rst-server={rst_s})",
                 "le firewall autorise mais ne voit qu'UNE direction du flux (aller sans retour, "
-                "ou l'inverse) -> App-ID ne se complete jamais (incomplete), sessions coupees/expirees "
-                "des 2 cotes. Cause datacenter frequente (retour du trafic empruntant un autre chemin "
-                "que le firewall). VERIFIER : routage/PBF symetrique, interfaces in/out, "
-                "reglage 'tcp asymmetric-path' (drop/bypass), session offload. Ce n'est PAS un simple "
-                "refus serveur ni un blocage policy."))
+                "ou l'inverse) -> App-ID ne se complete jamais (incomplete), sessions qui expirent "
+                "(aged-out) ou coupees des 2 cotes. Cause datacenter frequente (retour du trafic "
+                "empruntant un autre chemin que le firewall). VERIFIER : routage/PBF symetrique, "
+                "interfaces in/out, reglage 'tcp asymmetric-path' (drop/bypass), session offload, "
+                "et le compteur 'flow_tcp_non_syn_drop' (--check-routing le confirme). Ce n'est PAS "
+                "un simple refus serveur ni un blocage policy."))
             asym = True
         else:
             asym = False
