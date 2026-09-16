@@ -222,8 +222,16 @@ def dump_fields(pano, src, dst, port, proto, since_str, nlogs, timeout):
         c.append(f"(proto eq {proto})")
     q = " and ".join(c)
 
-    # Champs susceptibles de contenir un domaine/SNI/url
-    HOST_HINTS = ("url", "misc", "sni", "hostname", "host", "domain", "server", "cn", "subject")
+    # Noms de champs (exacts) susceptibles de contenir un domaine/SNI/url
+    HOST_FIELDS = {"url", "misc", "sni", "hostname", "host", "domain", "server_name",
+                   "subject", "cn", "url_domain", "http_host", "tls_sni"}
+
+    def _is_host_field(k, v):
+        kl = k.lower()
+        if kl not in HOST_FIELDS:
+            return False
+        # ignore les valeurs vides / numeriques (ex: domain=0)
+        return bool(v) and not str(v).strip().isdigit() and str(v).strip() not in ("", "0")
 
     for lt in ("traffic", "threat", "url"):
         try:
@@ -241,12 +249,14 @@ def dump_fields(pano, src, dst, port, proto, since_str, nlogs, timeout):
                 if v and k not in keys:
                     keys[k] = v
         R.append(f"\n[{lt}] {len(entries)} entree(s), {len(keys)} champ(s) :")
-        # d'abord les champs "interessants" (hostname/url/sni)
-        interesting = [k for k in keys if any(h in k.lower() for h in HOST_HINTS)]
+        # d'abord les champs "interessants" (hostname/url/sni) - nom exact + valeur non vide
+        interesting = [k for k in keys if _is_host_field(k, keys[k])]
         if interesting:
-            R.append("   >>> Champs pouvant contenir un DOMAINE/SNI :")
+            R.append("   >>> Champs contenant un DOMAINE/SNI :")
             for k in interesting:
                 R.append(f"        {k} = {keys[k][:60]}")
+        else:
+            R.append("   (aucun champ SNI/domaine renseigne -> non logge sur ce flux)")
         R.append("   Tous les champs (echantillon) :")
         for k in sorted(keys):
             R.append(f"        {k:22} = {str(keys[k])[:50]}")
