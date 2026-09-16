@@ -68,14 +68,16 @@ def confirm_firewall_tcp(pano, serial, src, dst, port):
     R.append(f"[VERIF FIREWALL {serial}] (lecture seule)")
 
     # 1. Reglage tcp asymmetric-path
+    drop_mode = True
     try:
         xml = pano.get_config_target(
             "/config/devices/entry[@name='localhost.localdomain']/deviceconfig/setting/tcp", serial)
         m = _re.search(r"<asymmetric-path>(.*?)</asymmetric-path>", xml)
         val = m.group(1).strip() if m else "drop (defaut)"
+        drop_mode = "drop" in val.lower()
         R.append(f"    tcp asymmetric-path = {val}"
                  + ("  -> le firewall DROP les sessions asymetriques (explique incomplete/reset)"
-                    if "drop" in val.lower() else "  -> bypass (asymetrie toleree)"))
+                    if drop_mode else "  -> bypass (asymetrie toleree)"))
     except Exception as e:
         R.append(f"    [reglage tcp] erreur: {str(e).splitlines()[0]}")
 
@@ -95,6 +97,18 @@ def confirm_firewall_tcp(pano, serial, src, dst, port):
                 R.append(f"        {name} = {value}")
         else:
             R.append("    Compteurs d'asymetrie : aucun increment (relancer pendant que le flux tente).")
+        # Verdict
+        non_syn = any("non_syn" in n.lower() for n, _ in hits)
+        if hits and drop_mode:
+            sev = "CONFIRME" if non_syn else "TRES PROBABLE"
+            R.append(f"    >>> ROUTAGE ASYMETRIQUE {sev} : le firewall recoit du trafic hors-SYN "
+                     "(SYN parti par un autre chemin) et le DROP (asymmetric-path=drop).")
+            R.append("        FIX: rendre le routage RETOUR symetrique (retour dst->src doit repasser")
+            R.append("        par ce firewall). Contournement (baisse la securite TCP stateful): "
+                     "'set deviceconfig setting tcp asymmetric-path bypass'.")
+        elif hits and not drop_mode:
+            R.append("    >>> Compteurs d'asymetrie presents mais asymmetric-path=bypass (tolere) -> "
+                     "si le flux echoue, chercher ailleurs (serveur).")
     except Exception as e:
         R.append(f"    [compteurs] erreur: {str(e).splitlines()[0]}")
 
