@@ -107,8 +107,26 @@ def bgp_summary(pano, serial, vr):
     return peers, None
 
 
+def fib_lookup(pano, serial, vr, ip):
+    """Chemin EFFECTIF choisi pour une IP (test fib-lookup) -> instantane, 1 resultat.
+    Rapide meme avec une RIB enorme (pas de dump de table)."""
+    cmd = (f"<test><routing><fib-lookup><virtual-router>{vr}</virtual-router>"
+           f"<ip>{ip}</ip></fib-lookup></routing></test>")
+    try:
+        x = pano._op(cmd, target=serial)
+    except Exception as e:
+        return None, str(e).splitlines()[0]
+    iface = _tag(x, "interface")
+    nh = _tag(x, "nh") or _tag(x, "nexthop") or _tag(x, "via")
+    dtype = _tag(x, "dtype") or _tag(x, "dm")
+    if not iface and "error" in x.lower():
+        msg = re.search(r"<msg>(.*?)</msg>", x, re.S)
+        return None, ("pas de route: " + (msg.group(1).strip()[:80] if msg else x[:80]))
+    return {"iface": iface or "?", "nh": nh or "(direct)", "dtype": dtype or ""}, None
+
+
 def route_nexthops(pano, serial, vr, ip):
-    """Next-hops EFFECTIFS pour une IP (RIB/FIB) -> plusieurs = ECMP."""
+    """[LENT] Dump RIB filtre -> montre TOUS les next-hops egaux (ECMP). Sur --rib."""
     cmd = (f"<show><routing><route><virtual-router>{vr}</virtual-router>"
            f"<destination>{ip}</destination></route></routing></show>")
     try:
@@ -129,8 +147,12 @@ def route_nexthops(pano, serial, vr, ip):
 def main():
     p = argparse.ArgumentParser(description="Diagnostic BGP/ECMP/symetrie de routage (lecture seule)")
     p.add_argument("--serial", required=True, help="Serial ou hostname du firewall")
-    p.add_argument("--src", help="IP source du flux (pour voir les next-hops retour)")
-    p.add_argument("--dst", help="IP destination du flux (pour voir les next-hops aller)")
+    p.add_argument("--src", help="IP source du flux (pour voir le chemin retour)")
+    p.add_argument("--dst", help="IP destination du flux (pour voir le chemin aller)")
+    p.add_argument("--vr", help="Cibler UN seul virtual-router (evite de boucler sur tous)")
+    p.add_argument("--no-bgp", action="store_true", help="Ne pas interroger le summary BGP (plus rapide)")
+    p.add_argument("--rib", action="store_true",
+                   help="[LENT] dump RIB complet du prefixe -> montre TOUS les next-hops ECMP")
     p.add_argument("--config")
     p.add_argument("--dev", action="store_true")
     args = p.parse_args()
@@ -145,13 +167,14 @@ def main():
     print(f"[BGP/ECMP] Diagnostic routage du firewall {serial}")
     print("=" * 70)
 
-    vrs = list_vrs(pano, serial)
+    vrs = [args.vr] if args.vr else list_vrs(pano, serial)
     if not vrs:
         print("[!] Aucun virtual-router trouve (routage avance/logical-router ? verifier manuellement).")
         return
-    print(f"Virtual-routers : {vrs}\n")
+    print(f"Virtual-routers : {vrs}" + ("  (cible --vr)" if args.vr else "") + "\n")
 
     asym_ecmp_vr = []
+    fib_ifaces = {}   # (vr) -> {"aller": iface, "retour": iface} pour comparer la symetrie
     for vr in vrs:
         print(f"--- VR '{vr}' " + "-" * (60 - len(vr)))
 
@@ -172,29 +195,48 @@ def main():
                 asym_ecmp_vr.append(vr)
 
         # BGP
-        peers, err = bgp_summary(pano, serial, vr)
-        if err:
-            print(f"  BGP  : [pas de summary] {err}")
-        elif peers is not None:
-            up = sum(1 for _, s, _ in peers if "estab" in s.lower() or "up" in s.lower())
-            print(f"  BGP  : {len(peers)} voisin(s), {up} Established")
-            for ip, st, rib in peers[:8]:
-                print(f"         - {ip:18} {st}" + (f"  routes={rib}" if rib else ""))
+        if args.no_bgp:
+            print("  BGP  : (ignore, --no-bgp)")
+        else:
+            peers, err = bgp_summary(pano, serial, vr)
+            if err:
+                print(f"  BGP  : [pas de summary] {err}")
+            elif peers is not None:
+                up = sum(1 for _, s, _ in peers if "estab" in s.lower() or "up" in s.lower())
+                print(f"  BGP  : {len(peers)} voisin(s), {up} Established")
+                for ip, st, rib in peers[:8]:
+                    print(f"         - {ip:18} {st}" + (f"  routes={rib}" if rib else ""))
 
-        # Next-hops effectifs du flux (ECMP concret)
-        for label, ip in (("ALLER  vers dst", args.dst), ("RETOUR vers src", args.src)):
+        # Chemin effectif du flux : fib-lookup (RAPIDE) par defaut, RIB complet sur --rib
+        fib_ifaces[vr] = {}
+        for label, key, ip in (("ALLER  vers dst", "aller", args.dst),
+                               ("RETOUR vers src", "retour", args.src)):
             if not ip:
                 continue
-            nhs, err = route_nexthops(pano, serial, vr, ip)
-            if err:
-                print(f"  {label} {ip}: [route illisible] {err}")
-            elif not nhs:
-                print(f"  {label} {ip}: aucune route (hors de ce VR ?)")
+            res, err = fib_lookup(pano, serial, vr, ip)
+            if err or res is None:
+                print(f"  {label} {ip:16}: {err or 'pas de resultat'}")
             else:
-                tag = "  <== PLUSIEURS next-hops = ECMP" if len(nhs) > 1 else ""
-                print(f"  {label} {ip}: {len(nhs)} next-hop(s){tag}")
-                for dst, nh, iface, flags in nhs[:6]:
-                    print(f"         {dst:20} via {nh:16} {iface}  [{flags}]")
+                fib_ifaces[vr][key] = res["iface"]
+                print(f"  {label} {ip:16}: iface={res['iface']} nexthop={res['nh']}"
+                      + (f" [{res['dtype']}]" if res["dtype"] else ""))
+            if args.rib and not err:
+                nhs, rerr = route_nexthops(pano, serial, vr, ip)
+                if not rerr and nhs and len(nhs) > 1:
+                    print(f"        RIB: {len(nhs)} next-hops egaux  <== ECMP")
+                    for dst, nh, iface, flags in nhs[:6]:
+                        print(f"           {dst:20} via {nh:16} {iface}  [{flags}]")
+                elif not rerr and nhs:
+                    print(f"        RIB: 1 next-hop (pas d'ECMP sur ce prefixe)")
+
+        # Comparaison symetrie aller/retour (le point cle)
+        a = fib_ifaces[vr].get("aller")
+        r = fib_ifaces[vr].get("retour")
+        if a and r:
+            if a == r:
+                print(f"  >>> aller et retour sur la MEME interface ({a}) -> symetrique sur ce VR.")
+            else:
+                print(f"  >>> aller={a}  retour={r}  DIFFERENTES -> chemin ASYMETRIQUE cote firewall.")
         print()
 
     # Verdict
