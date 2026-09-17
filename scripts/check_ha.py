@@ -91,6 +91,7 @@ def main():
         print("  -> Soit former une paire HA active/active (changement lourd, maintenance),")
         print("     soit passer par l'OPTION 2 : rendre l'ECMP symetrique / PBF deterministe.")
         _print_counters(pano, serial)
+        _print_toggles(pano, serial)
         return
 
     local = section(ha, "local-info")
@@ -99,12 +100,14 @@ def main():
     local_state = tag(local, "state", "?")
     peer_state = tag(peer, "state", "?")
     peer_conn = tag(peer, "conn-status", tag(peer, "conn-status", "?"))
+    peer_serial = tag(peer, "serial-num") or tag(peer, "serial") or "?"
     ha2_state = tag(local, "ha2-state") or tag(ha, "ha2-state")
     state_sync = tag(local, "state-sync") or tag(ha, "state-sync")
 
     print(f"\n  HA active     : oui")
     print(f"  Mode          : {mode}")
     print(f"  Etat local    : {local_state}    Etat peer : {peer_state} (conn={peer_conn})")
+    print(f"  Peer serial   : {peer_serial}")
     print(f"  HA2 (sessions): state={ha2_state or '?'}  state-sync={state_sync or '?'}")
 
     is_aa = "active-active" in mode.lower() or "active/active" in mode.lower()
@@ -139,6 +142,7 @@ def main():
         print(f"  Session owner : {so_sel}   session setup : {ss_sel or '?'}")
 
     _print_counters(pano, serial)
+    _print_toggles(pano, serial)
 
     # --- 3. Verdict ---
     print("\n" + "-" * 68)
@@ -193,6 +197,35 @@ def _print_counters(pano, serial):
             print(f"    flow_tcp_non_syn_drop = {non_syn_drop}   <- >0 = paquets droppes faute de session")
         if oow is not None:
             print(f"    tcp_drop_out_of_wnd   = {oow}")
+
+
+def _print_toggles(pano, serial):
+    """Etat des contournements d'asymetrie cote firewall (mitigation deja posee ?)."""
+    asym = reject = None
+    try:
+        xml = pano.get_config_target(
+            "/config/devices/entry[@name='localhost.localdomain']/deviceconfig/setting/tcp", serial)
+        m = re.search(r"<asymmetric-path>(.*?)</asymmetric-path>", xml)
+        asym = m.group(1).strip() if m else "drop (defaut)"
+    except Exception:
+        pass
+    try:
+        xml = pano.get_config_target(
+            "/config/devices/entry[@name='localhost.localdomain']/deviceconfig/setting/session", serial)
+        m = re.search(r"<tcp-reject-non-syn>(.*?)</tcp-reject-non-syn>", xml)
+        reject = m.group(1).strip() if m else "yes (defaut)"
+    except Exception:
+        pass
+    print("\n  Contournements d'asymetrie (etat actuel) :")
+    print(f"    tcp asymmetric-path   = {asym or '?'}"
+          + ("   -> DROP (aucune tolerance)" if asym and "drop" in asym.lower() else
+             "   -> bypass (asymetrie toleree)" if asym and "bypass" in asym.lower() else ""))
+    print(f"    tcp-reject-non-syn    = {reject or '?'}"
+          + ("   -> rejette les non-SYN (aucune tolerance)" if reject and "yes" in reject.lower() else
+             "   -> accepte les non-SYN (tolere)" if reject and "no" in reject.lower() else ""))
+    if asym and "drop" in asym.lower():
+        print("    (mitigation possible: 'set deviceconfig setting tcp asymmetric-path bypass'"
+              " -> baisse la securite TCP stateful)")
 
 
 if __name__ == "__main__":
