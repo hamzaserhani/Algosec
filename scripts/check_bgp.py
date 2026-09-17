@@ -48,22 +48,40 @@ def _tag(xml, name, default=None):
     return m.group(1).strip() if m else default
 
 
+def _plausible_vr(name):
+    """Filtre les faux 'VR' (noms de route-maps/prefixes remontes par erreur)."""
+    if not name:
+        return False
+    if "/" in name or " " in name:          # prefixes, noms de policy avec espaces
+        return False
+    if re.match(r"^\d+\.\d+\.\d+", name):     # ressemble a une IP/prefixe
+        return False
+    return True
+
+
 def list_vrs(pano, serial):
-    """Virtual-routers du firewall (via 'show routing summary', fallback config)."""
+    """Virtual-routers du firewall (via 'show routing summary', fallback config).
+    Filtre le bruit (route-maps/prefixes) pour ne garder que de vrais VR."""
+    vrs = []
     try:
         xml = pano._op("<show><routing><summary></summary></routing></show>", target=serial)
-        vrs = list(dict.fromkeys(_tags(xml, "virtual-router")))
-        vrs = [v for v in vrs if v]
-        if vrs:
-            return vrs
+        vrs = _tags(xml, "virtual-router")
     except Exception:
         pass
-    try:
-        cfg = pano.get_config_target(
-            "/config/devices/entry[@name='localhost.localdomain']/network/virtual-router", serial)
-        return re.findall(r'<entry name="([^"]+)"', cfg)
-    except Exception:
-        return []
+    if not vrs:
+        try:
+            cfg = pano.get_config_target(
+                "/config/devices/entry[@name='localhost.localdomain']/network/virtual-router", serial)
+            vrs = re.findall(r'<entry name="([^"]+)"', cfg)
+        except Exception:
+            vrs = []
+    seen, out = set(), []
+    for v in vrs:
+        v = v.strip()
+        if _plausible_vr(v) and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
 
 
 def ecmp_config(pano, serial, vr):
@@ -173,31 +191,54 @@ def main():
         return
     print(f"Virtual-routers : {vrs}" + ("  (cible --vr)" if args.vr else "") + "\n")
 
-    asym_ecmp_vr = []
-    fib_ifaces = {}   # (vr) -> {"aller": iface, "retour": iface} pour comparer la symetrie
+    # Si un flux est donne, on ne garde que le(s) VR qui RESOLVENT reellement la dst
+    # (evite de traiter/afficher les dizaines de VR ou le flux n'existe pas).
+    probe_ip = args.dst or args.src
+    if probe_ip and not args.vr:
+        real = []
+        for vr in vrs:
+            res, err = fib_lookup(pano, serial, vr, probe_ip)
+            if not err and res is not None:
+                real.append(vr)
+        if real:
+            print(f"VR concernes par le flux ({probe_ip}) : {real}\n")
+            vrs = real
+        else:
+            print(f"[!] Aucun VR ne route {probe_ip} — verifier l'IP ou le vsys.\n")
+
+    ecmp_on_vr = []
+    skipped = 0
     for vr in vrs:
-        print(f"--- VR '{vr}' " + "-" * (60 - len(vr)))
+        # fib-lookup d'abord : si le VR n'existe pas / ne route pas, on saute vite.
+        fib = {}
+        invalid = False
+        for key, ip in (("aller", args.dst), ("retour", args.src)):
+            if not ip:
+                continue
+            res, err = fib_lookup(pano, serial, vr, ip)
+            if err and "invalid virtual-router" in (err or "").lower():
+                invalid = True
+                break
+            fib[key] = (res, err)
+        if invalid:
+            skipped += 1
+            continue
+
+        print(f"--- VR '{vr}' " + "-" * max(4, 60 - len(vr)))
 
         # ECMP
         e = ecmp_config(pano, serial, vr)
         if "error" in e:
             print(f"  ECMP : [config illisible] {e['error']}")
         elif not e["enable"]:
-            print("  ECMP : DESACTIVE sur ce VR (un seul chemin installe par prefixe).")
+            print("  ECMP : DESACTIVE (un seul chemin installe par prefixe).")
         else:
-            print(f"  ECMP : ACTIVE  | max-path={e['max_path']}  algorithme={e['algorithm']}")
-            if e["symmetric_return"]:
-                print("         Symmetric Return = ON  -> le retour ressort par l'interface d'entree "
-                      "(aide a la symetrie).")
-            else:
-                print("         Symmetric Return = OFF  <== l'aller et le retour peuvent sortir par des")
-                print("         next-hops DIFFERENTS -> asymetrie possible sur les flux ECMP.")
-                asym_ecmp_vr.append(vr)
+            print(f"  ECMP : ACTIVE  | max-path={e['max_path']}  algo={e['algorithm']}  "
+                  f"Symmetric-Return={'ON' if e['symmetric_return'] else 'OFF'}")
+            ecmp_on_vr.append((vr, e["symmetric_return"]))
 
         # BGP
-        if args.no_bgp:
-            print("  BGP  : (ignore, --no-bgp)")
-        else:
+        if not args.no_bgp:
             peers, err = bgp_summary(pano, serial, vr)
             if err:
                 print(f"  BGP  : [pas de summary] {err}")
@@ -207,56 +248,48 @@ def main():
                 for ip, st, rib in peers[:8]:
                     print(f"         - {ip:18} {st}" + (f"  routes={rib}" if rib else ""))
 
-        # Chemin effectif du flux : fib-lookup (RAPIDE) par defaut, RIB complet sur --rib
-        fib_ifaces[vr] = {}
-        for label, key, ip in (("ALLER  vers dst", "aller", args.dst),
-                               ("RETOUR vers src", "retour", args.src)):
-            if not ip:
+        # Chemin effectif (fib-lookup) : egress vers dst et vers src (informatif)
+        for label, key in (("ALLER  vers dst", "aller"), ("RETOUR vers src", "retour")):
+            if key not in fib:
                 continue
-            res, err = fib_lookup(pano, serial, vr, ip)
+            res, err = fib[key]
             if err or res is None:
-                print(f"  {label} {ip:16}: {err or 'pas de resultat'}")
+                print(f"  {label}: {err or 'pas de resultat'}")
             else:
-                fib_ifaces[vr][key] = res["iface"]
-                print(f"  {label} {ip:16}: iface={res['iface']} nexthop={res['nh']}"
+                print(f"  {label}: egress={res['iface']} nexthop={res['nh']}"
                       + (f" [{res['dtype']}]" if res["dtype"] else ""))
-            if args.rib and not err:
-                nhs, rerr = route_nexthops(pano, serial, vr, ip)
-                if not rerr and nhs and len(nhs) > 1:
-                    print(f"        RIB: {len(nhs)} next-hops egaux  <== ECMP")
-                    for dst, nh, iface, flags in nhs[:6]:
-                        print(f"           {dst:20} via {nh:16} {iface}  [{flags}]")
-                elif not rerr and nhs:
-                    print(f"        RIB: 1 next-hop (pas d'ECMP sur ce prefixe)")
-
-        # Comparaison symetrie aller/retour (le point cle)
-        a = fib_ifaces[vr].get("aller")
-        r = fib_ifaces[vr].get("retour")
-        if a and r:
-            if a == r:
-                print(f"  >>> aller et retour sur la MEME interface ({a}) -> symetrique sur ce VR.")
-            else:
-                print(f"  >>> aller={a}  retour={r}  DIFFERENTES -> chemin ASYMETRIQUE cote firewall.")
+                if args.rib:
+                    ip = args.dst if key == "aller" else args.src
+                    nhs, rerr = route_nexthops(pano, serial, vr, ip)
+                    if not rerr and nhs and len(nhs) > 1:
+                        print(f"        RIB: {len(nhs)} next-hops egaux  <== ECMP sur ce prefixe")
+                        for d, nh, ifc, fl in nhs[:6]:
+                            print(f"           {d:20} via {nh:16} {ifc}  [{fl}]")
         print()
+
+    if skipped:
+        print(f"({skipped} VR sans route pour ce flux, ignores)\n")
 
     # Verdict
     print("=" * 70)
     print(">>> VERDICT :")
-    if asym_ecmp_vr:
-        print(f"  ECMP ACTIVE sans Symmetric Return sur : {asym_ecmp_vr}")
-        print("  -> C'est un moteur d'ASYMETRIE : un flux peut emprunter des next-hops")
-        print("     differents a l'aller et au retour. Pistes de correction :")
-        print("     1) activer 'Symmetric Return' sur le VR (le retour ressort par l'interface")
-        print("        d'entree) — efficace surtout si le serveur est derriere ce firewall ;")
-        print("     2) reduire max-path a 1 pour les prefixes concernes (pas d'ECMP = 1 seul chemin),")
-        print("        via une route statique/priorite BGP plus specifique (10.1.94.0/23, 10.120.0.0/22) ;")
-        print("     3) rendre le hash ECMP coherent aller/retour (algorithme + memes chemins des 2 cotes).")
-        print("  NB: si l'asymetrie est INTER-firewalls (plusieurs boitiers annoncent les memes")
-        print("      prefixes en BGP), il faut router ces prefixes de facon deterministe vers UN seul.")
+    if not ecmp_on_vr:
+        print("  ECMP DESACTIVE sur le(s) VR du flux : le firewall installe UN seul chemin")
+        print("  par prefixe -> l'asymetrie ne vient PAS d'un multipath du Palo.")
+        print("  -> Elle est en AMONT : les routeurs de coeur repartissent (ECMP) l'aller et")
+        print("     le retour vers des firewalls/chemins differents (cf. les 2 next-hops")
+        print("     10.140.0.x vus au traceroute). C'est LA qu'il faut agir :")
+        print("     1) router 10.120.0.0/22 <-> 10.1.94.0/23 de facon DETERMINISTE vers le meme")
+        print("        firewall (a l'aller ET au retour), ou hash ECMP symetrique per-flow ;")
+        print("     2) mitigation firewall (baisse la secu stateful) : 'set deviceconfig setting")
+        print("        tcp asymmetric-path bypass' en attendant le fix routage.")
     else:
-        print("  Pas d'ECMP asymetrique detecte sur les VR lus. Si le flux droppe encore :")
-        print("  - verifier si PLUSIEURS firewalls annoncent les memes prefixes BGP (ECMP inter-boitiers),")
-        print("  - comparer les next-hops aller/retour ci-dessus (doivent pointer la MEME interface).")
+        for vr, sr in ecmp_on_vr:
+            if not sr:
+                print(f"  VR '{vr}': ECMP ACTIVE + Symmetric Return OFF -> moteur d'asymetrie possible.")
+                print("     -> activer Symmetric Return, ou max-path 1 sur 10.1.94.0/23 & 10.120.0.0/22.")
+            else:
+                print(f"  VR '{vr}': ECMP ACTIVE mais Symmetric Return ON -> retour force cote entree.")
     print("=" * 70)
 
 
