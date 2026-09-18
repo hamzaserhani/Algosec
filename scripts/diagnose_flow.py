@@ -911,6 +911,70 @@ def diagnose(logs_by_type, flow):
     return R
 
 
+def policy_check(pano, serial, src, dst, proto, port):
+    """Evaluation STATIQUE de la policy (rulebase effective) : le flux est-il
+    autorise par la config ? Informatif (les LOGS font foi) mais repond meme
+    quand il n'y a AUCUN log (flux jamais tente)."""
+    R = [f"[POLICY] Evaluation statique sur {serial} (rulebase effective - informatif)"]
+    res = None
+    try:
+        eng = PolicyEngine(pano, serial)
+        eng.load_firewall_rules()
+        eng.load_objects()
+        res = eng.evaluate(src, dst, (proto or "tcp"), int(port) if port else 443)
+    except Exception as e:
+        R.append(f"    [WARN] policy non evaluable: {str(e).splitlines()[0]}")
+        return R, None
+    status = res.get("status")
+    rule = res.get("rule")
+    note = res.get("note")
+    if status == "ALLOWED":
+        R.append(f"    [ALLOWED] Autorise par la regle '{rule}'.")
+    elif status == "BLOCKED":
+        R.append(f"    [BLOCKED] Refuse explicitement par la regle '{rule}'.")
+    elif status == "NO_MATCH":
+        R.append("    [DENY-DEFAUT] Aucune regle n'autorise ce flux -> deny par defaut.")
+    elif status == "REVIEW":
+        R.append(f"    [REVIEW] Indetermine par la config"
+                 + (f" (regle '{rule}')" if rule else "") + " -> se fier aux LOGS."
+                 + (f"  ({note})" if note else ""))
+    else:
+        R.append(f"    [{status}] {note or ''}")
+    return R, res
+
+
+def _first_sev(text, sev):
+    import re as _re
+    m = _re.search(rf"\[{sev}\] (.+)", text)
+    return m.group(1).strip() if m else None
+
+
+def headline(report_lines, policy_res, has_traffic):
+    """Conclusion en UNE ligne (lisible par une autre equipe) : ✅ / ⚠️ / ❌."""
+    text = "\n".join(report_lines)
+    asym = ("ROUTAGE ASYMETRIQUE CONFIRME" in text or "ROUTAGE ASYMETRIQUE TRES PROBABLE" in text
+            or "Probable ROUTAGE ASYMETRIQUE" in text)
+    bloque = _first_sev(text, "BLOQUE")
+    probleme = _first_sev(text, "PROBLEME")
+    if asym:
+        return ("NE FONCTIONNE PAS  -  ROUTAGE ASYMETRIQUE : le firewall autorise mais "
+                "droppe les paquets hors-session (aller/retour par des chemins differents).")
+    if bloque:
+        return f"NE FONCTIONNE PAS  -  {bloque}"
+    if probleme:
+        return f"PROBLEME  -  {probleme}"
+    if has_traffic:
+        return "FONCTIONNE  -  le flux passe (serveur repond, aucune anomalie bloquante)."
+    st = (policy_res or {}).get("status")
+    if st == "ALLOWED":
+        return ("AUTORISE PAR LA POLICY mais AUCUN trafic observe sur la fenetre "
+                "-> flux pas encore tente, ou n'atteint pas ce firewall (elargir --days).")
+    if st in ("NO_MATCH", "BLOCKED"):
+        return "BLOQUE PAR LA POLICY (aucune regle ne l'autorise) - et aucun trafic observe."
+    return ("INDETERMINE  -  aucun log sur la fenetre et policy non concluante "
+            "(elargir --days, ou verifier que c'est le bon firewall).")
+
+
 def main():
     p = argparse.ArgumentParser(description="Diagnostic expert d'un flux (correlation multi-logs Panorama)")
     p.add_argument("--src")
@@ -930,6 +994,8 @@ def main():
     p.add_argument("--nlogs", type=int, default=100)
     p.add_argument("--timeout", type=int, default=300)
     p.add_argument("--json", dest="json_path")
+    p.add_argument("--no-policy", dest="no_policy", action="store_true",
+                   help="Ne pas evaluer la policy (config) - plus rapide")
     args = p.parse_args()
 
     config_path = args.config or ("config-dev.json" if args.dev else "config.json")
@@ -1037,6 +1103,19 @@ def main():
     else:
         report = diagnose(logs, flow)
 
+    # Check POLICY (config) : le flux est-il autorise par la rulebase ? (informatif,
+    # repond meme sans logs). Requiert --serial + src + dst.
+    policy_res = None
+    if args.serial and args.src and args.dst and not args.no_policy and not url_only:
+        serial = resolve_serial(pano, args.serial)
+        report.append("")
+        try:
+            pol_lines, policy_res = policy_check(pano, serial, args.src, args.dst,
+                                                 args.proto, args.port)
+            report += pol_lines
+        except Exception as e:
+            report.append(f"[POLICY] non evaluable: {str(e).splitlines()[0]}")
+
     # Confirmation DECRYPTION : si --serial + dst, on verifie la decryption-rulebase
     if args.serial and args.dst:
         serial = resolve_serial(pano, args.serial)  # accepte un hostname (Cloud NGFW autoscale)
@@ -1085,9 +1164,17 @@ def main():
             except Exception as e:
                 report.append(f"    [WARN] firewalls-path echoue: {str(e).splitlines()[0]}")
 
+    has_traffic = bool(logs.get("traffic")) if not url_only else bool(logs.get("url"))
+    verdict = headline(report, policy_res, has_traffic)
+
     print("\n" + "=" * 60)
+    print(f">>> CONCLUSION : {verdict}")
+    print(f"    Flux : {flow}")
+    print("=" * 60)
     for line in report:
         print(line)
+    print("=" * 60)
+    print(f">>> CONCLUSION : {verdict}")
     print("=" * 60)
 
     if args.json_path:
