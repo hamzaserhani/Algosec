@@ -949,8 +949,10 @@ def _first_sev(text, sev):
     return m.group(1).strip() if m else None
 
 
-def headline(report_lines, policy_res, has_traffic):
-    """Conclusion en UNE ligne (lisible par une autre equipe) : ✅ / ⚠️ / ❌."""
+def headline(report_lines, policy_by_fw, has_traffic):
+    """Conclusion en UNE ligne (lisible par une autre equipe) : ✅ / ⚠️ / ❌.
+    policy_by_fw : dict {serial: res} (multi-firewall). Un seul firewall qui
+    refuse suffit a casser le flux."""
     text = "\n".join(report_lines)
     asym = ("ROUTAGE ASYMETRIQUE CONFIRME" in text or "ROUTAGE ASYMETRIQUE TRES PROBABLE" in text
             or "Probable ROUTAGE ASYMETRIQUE" in text)
@@ -965,14 +967,18 @@ def headline(report_lines, policy_res, has_traffic):
         return f"PROBLEME  -  {probleme}"
     if has_traffic:
         return "FONCTIONNE  -  le flux passe (serveur repond, aucune anomalie bloquante)."
-    st = (policy_res or {}).get("status")
-    if st == "ALLOWED":
-        return ("AUTORISE PAR LA POLICY mais AUCUN trafic observe sur la fenetre "
-                "-> flux pas encore tente, ou n'atteint pas ce firewall (elargir --days).")
-    if st in ("NO_MATCH", "BLOCKED"):
-        return "BLOQUE PAR LA POLICY (aucune regle ne l'autorise) - et aucun trafic observe."
+    # Pas de trafic -> on se rabat sur la policy (config), agregee sur tous les firewalls.
+    statuses = {fw: (res or {}).get("status") for fw, res in (policy_by_fw or {}).items()}
+    blocked = [fw for fw, st in statuses.items() if st in ("NO_MATCH", "BLOCKED")]
+    allowed = [fw for fw, st in statuses.items() if st == "ALLOWED"]
+    if blocked:
+        return (f"BLOQUE PAR LA POLICY sur : {', '.join(blocked)} (aucun trafic observe) "
+                "- un seul firewall qui refuse suffit a casser le flux.")
+    if allowed:
+        return (f"AUTORISE PAR LA POLICY sur {', '.join(allowed)} mais AUCUN trafic observe "
+                "-> flux pas encore tente, ou n'atteint pas ces firewalls (elargir --days).")
     return ("INDETERMINE  -  aucun log sur la fenetre et policy non concluante "
-            "(elargir --days, ou verifier que c'est le bon firewall).")
+            "(elargir --days, ou verifier que ce sont les bons firewalls).")
 
 
 def main():
@@ -983,6 +989,7 @@ def main():
     p.add_argument("--proto")
     p.add_argument("--url", help="Domaine/URL (ajoute le filtre url contains)")
     p.add_argument("--serial", help="Serial OU hostname du firewall (resolu vers un serial vivant, utile pour Cloud NGFW autoscale) : verifie les regles de DECRYPTION")
+    p.add_argument("--serials", help="Plusieurs firewalls (csv) a evaluer. Sinon AUTO-detection depuis les logs (device_name) : tu tapes juste src/dst/port.")
     p.add_argument("--check-routing", dest="check_routing", action="store_true",
                    help="Verifie la symetrie du routage aller/retour (fib-lookup) - necessite --serial + --dst")
     p.add_argument("--vs-src", dest="vs_src", help="2e source a COMPARER pour le meme --url (ex: 'ca marche depuis A, pas depuis B')")
@@ -1103,69 +1110,111 @@ def main():
     else:
         report = diagnose(logs, flow)
 
-    # Check POLICY (config) : le flux est-il autorise par la rulebase ? (informatif,
-    # repond meme sans logs). Requiert --serial + src + dst.
-    policy_res = None
-    if args.serial and args.src and args.dst and not args.no_policy and not url_only:
-        serial = resolve_serial(pano, args.serial)
+    # --- Quels firewalls analyser ? ---
+    #  1) --serials explicite  2) --serial  3) AUTO depuis les logs (device_name)
+    #     -> l'utilisateur peut ne taper QUE src/dst/port : on trouve les firewalls
+    #        qui ont vu le flux (y compris celui qui le BLOQUE, qui logge son deny).
+    serials = []
+    if args.serials:
+        serials = [s.strip() for s in args.serials.split(",") if s.strip()]
+    elif args.serial:
+        serials = [args.serial]
+    elif not url_only:
+        traffic = logs.get("traffic") or []
+        for e in traffic:
+            dn = e.get("device_name") or e.get("serial")
+            if dn and dn not in serials:
+                serials.append(dn)
         report.append("")
-        try:
-            pol_lines, policy_res = policy_check(pano, serial, args.src, args.dst,
-                                                 args.proto, args.port)
-            report += pol_lines
-        except Exception as e:
-            report.append(f"[POLICY] non evaluable: {str(e).splitlines()[0]}")
+        if serials:
+            report.append(f"[AUTO] Firewalls ayant vu ce flux dans les logs : {serials}")
+            report.append("       (aucun --serial fourni -> analyse policy + etat sur chacun)")
+        elif args.dst:
+            report.append("[AUTO] Aucun firewall n'a vu ce flux sur la fenetre.")
+            report.append("       -> soit le flux n'a jamais ete tente, soit il n'atteint aucun firewall.")
+            report.append("       -> pour tester la POLICY quand meme : --serials fw1,fw2  (ou elargir --days).")
 
-    # Confirmation DECRYPTION : si --serial + dst, on verifie la decryption-rulebase
-    if args.serial and args.dst:
-        serial = resolve_serial(pano, args.serial)  # accepte un hostname (Cloud NGFW autoscale)
+    policy_by_fw = {}
+    for raw in serials:
+        serial = resolve_serial(pano, raw)
         report.append("")
-        report.append(f"[DECRYPTION RULES] Verification sur le firewall {serial}...")
-        try:
-            matched = check_decryption_rules(pano, serial, args.src, args.dst)
-            if not matched:
-                report.append("    Aucune regle de dechiffrement ne matche ce flux "
-                              "-> le flux n'est probablement PAS dechiffre (hypothese decrypt a ecarter).")
-            for m in matched:
-                act = (m["action"] or m["type"] or "?").lower()
-                if "no-decrypt" in act:
-                    report.append(f"    [OK] Regle '{m['name']}' -> no-decrypt "
-                                  f"(cat={m['category']}) : ce flux N'EST PAS dechiffre.")
-                else:
-                    report.append(f"    [CONFIRME] Regle '{m['name']}' -> DECRYPT "
-                                  f"(type={m['type']}, cat={m['category']}).")
-                    report.append("               => le firewall DECHIFFRE ce flux. Si le client SAP ne fait")
-                    report.append("                  pas confiance a la CA forward-trust -> echec TLS (RST client).")
-                    report.append("               FIX: passer ce flux en 'no-decrypt', ou installer la CA dans SAP.")
-        except Exception as e:
-            report.append(f"    [WARN] lecture decryption-rulebase echouee: {str(e).splitlines()[0]}")
+        report.append("#" * 60)
+        report.append(f"# FIREWALL {serial}" + (f"  (= {raw})" if raw != serial else ""))
+        report.append("#" * 60)
 
-    # Confirmation ROUTAGE ASYMETRIQUE / TCP cote firewall (si --serial + dst)
-    if args.serial and args.dst:
-        serial = resolve_serial(pano, args.serial)
-        report.append("")
-        try:
-            report += confirm_firewall_tcp(pano, serial, args.src or "", args.dst,
-                                           args.port or 445)
-        except Exception as e:
-            report.append(f"    [WARN] verif firewall tcp echouee: {str(e).splitlines()[0]}")
-        # Verification routage aller/retour (fib-lookup) + firewalls du chemin
-        if args.check_routing:
+        # 1. POLICY (config) : ce firewall autorise-t-il le flux ?
+        if args.src and args.dst and not args.no_policy and not url_only:
+            try:
+                pol_lines, res = policy_check(pano, serial, args.src, args.dst, args.proto, args.port)
+                report += pol_lines
+                policy_by_fw[serial] = res
+            except Exception as e:
+                report.append(f"[POLICY] non evaluable: {str(e).splitlines()[0]}")
+
+        # 2. DECRYPTION
+        if args.dst:
+            report.append("")
+            report.append(f"[DECRYPTION RULES] Verification sur {serial}...")
+            try:
+                matched = check_decryption_rules(pano, serial, args.src, args.dst)
+                if not matched:
+                    report.append("    Aucune regle de dechiffrement ne matche ce flux "
+                                  "-> le flux n'est probablement PAS dechiffre (hypothese decrypt a ecarter).")
+                for m in matched:
+                    act = (m["action"] or m["type"] or "?").lower()
+                    if "no-decrypt" in act:
+                        report.append(f"    [OK] Regle '{m['name']}' -> no-decrypt "
+                                      f"(cat={m['category']}) : ce flux N'EST PAS dechiffre.")
+                    else:
+                        report.append(f"    [CONFIRME] Regle '{m['name']}' -> DECRYPT "
+                                      f"(type={m['type']}, cat={m['category']}).")
+                        report.append("               => le firewall DECHIFFRE ce flux. Si le client ne fait")
+                        report.append("                  pas confiance a la CA forward-trust -> echec TLS (RST client).")
+                        report.append("               FIX: passer ce flux en 'no-decrypt', ou installer la CA.")
+            except Exception as e:
+                report.append(f"    [WARN] lecture decryption-rulebase echouee: {str(e).splitlines()[0]}")
+
+        # 3. ETAT TCP / ASYMETRIE cote firewall
+        if args.dst:
             report.append("")
             try:
-                report += check_routing(pano, serial, args.src or "", args.dst,
-                                        args.port or 445, since_str, args.nlogs, args.timeout)
+                report += confirm_firewall_tcp(pano, serial, args.src or "", args.dst, args.port or 445)
             except Exception as e:
-                report.append(f"    [WARN] check-routing echoue: {str(e).splitlines()[0]}")
-            report.append("")
-            try:
-                report += check_firewalls_path(pano, args.src or "", args.dst,
-                                               args.port, since_str, args.nlogs, args.timeout)
-            except Exception as e:
-                report.append(f"    [WARN] firewalls-path echoue: {str(e).splitlines()[0]}")
+                report.append(f"    [WARN] verif firewall tcp echouee: {str(e).splitlines()[0]}")
+            if args.check_routing:
+                report.append("")
+                try:
+                    report += check_routing(pano, serial, args.src or "", args.dst,
+                                            args.port or 445, since_str, args.nlogs, args.timeout)
+                except Exception as e:
+                    report.append(f"    [WARN] check-routing echoue: {str(e).splitlines()[0]}")
+
+    # Synthese POLICY multi-firewall (le point cle : QUI bloque)
+    if len(policy_by_fw) > 1:
+        report.append("")
+        report.append("[POLICY - SYNTHESE MULTI-FIREWALL] (1 seul refus casse le flux)")
+        for fw, res in policy_by_fw.items():
+            st = (res or {}).get("status", "?")
+            rl = (res or {}).get("rule")
+            report.append(f"    {fw:20} : {st}" + (f"  (regle '{rl}')" if rl else ""))
+        blocked = [fw for fw, res in policy_by_fw.items()
+                   if (res or {}).get("status") in ("NO_MATCH", "BLOCKED")]
+        if blocked:
+            report.append(f"    >>> REFUSE sur : {', '.join(blocked)}  <== c'est LA que le flux casse.")
+        else:
+            report.append("    >>> Autorise (config) sur TOUS les firewalls analyses.")
+
+    # firewalls-path (Panorama-wide : quels FW ont vu le flux) - une fois
+    if args.dst and args.check_routing:
+        report.append("")
+        try:
+            report += check_firewalls_path(pano, args.src or "", args.dst,
+                                           args.port, since_str, args.nlogs, args.timeout)
+        except Exception as e:
+            report.append(f"    [WARN] firewalls-path echoue: {str(e).splitlines()[0]}")
 
     has_traffic = bool(logs.get("traffic")) if not url_only else bool(logs.get("url"))
-    verdict = headline(report, policy_res, has_traffic)
+    verdict = headline(report, policy_by_fw, has_traffic)
 
     print("\n" + "=" * 60)
     print(f">>> CONCLUSION : {verdict}")
