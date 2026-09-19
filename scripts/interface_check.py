@@ -106,7 +106,8 @@ def fib_lookup(pano, serial, vr, ip):
 
 def main():
     p = argparse.ArgumentParser(description="Inventaire interfaces + proprietaire d'une IP (lecture seule)")
-    p.add_argument("--serial", required=True, help="Serial ou hostname du firewall")
+    p.add_argument("--serial", help="Serial ou hostname du firewall")
+    p.add_argument("--list", action="store_true", help="Lister tous les firewalls connus de Panorama (serial + hostname) puis quitter")
     p.add_argument("--ips", help="IP(s) a localiser (csv), ex: 10.140.0.164,10.140.0.10")
     p.add_argument("--route", action="store_true", help="Ajouter le fib-lookup des IP (comment ce FW les joint)")
     p.add_argument("--filter", dest="flt", help="Ne montrer que les interfaces contenant ce texte (ip/nom)")
@@ -118,6 +119,24 @@ def main():
     print(f"[INFO] config: {config_path}")
     pano = PanoramaClient(config_path)
     pano.keygen()
+
+    if args.list:
+        print("=" * 60)
+        print("[FIREWALLS CONNUS DE PANORAMA]")
+        print("=" * 60)
+        try:
+            devs = pano.list_devices()
+        except Exception as e:
+            print(f"[ERREUR] list devices : {str(e).splitlines()[0]}")
+            return
+        for d in sorted(devs, key=lambda x: x.get("hostname", "")):
+            print(f"  {d.get('hostname','?'):28} {d['serial']}")
+        print(f"\n({len(devs)} firewall(s))")
+        return
+
+    if not args.serial:
+        print("[!] Fournir --serial (ou --list pour voir les firewalls disponibles).")
+        return
     serial = resolve_serial(pano, args.serial)
 
     print("=" * 74)
