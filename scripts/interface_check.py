@@ -194,8 +194,11 @@ def main():
                 print("      -> CAS A : un seul firewall ; l'asymetrie est au niveau")
                 print("         interfaces/fabric (pas inter-boitiers).")
             else:
-                print(f"      Aucune de ces IP n'est locale a ce firewall ({targets}).")
-                print("      -> ce n'est pas ce firewall qui porte ces interfaces (verifier le bon serial).")
+                print(f"      Aucune de ces IP n'est une interface de CE firewall ({targets}).")
+                print("      -> ce sont des interfaces d'un/plusieurs AUTRE(S) equipement(s)")
+                print("         (firewall/routeur) sur le chemin. Si --route les montre joignables")
+                print("         via nos interfaces, elles sont bien EXTERNES a ce firewall")
+                print("         -> autre firewall dans le chemin (candidat asymetrie inter-firewalls).")
     print("=" * 74)
 
 
