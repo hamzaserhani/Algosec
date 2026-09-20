@@ -244,6 +244,9 @@ def confirm_firewall_tcp(pano, serial, src, dst, port):
             sev = "CONFIRME" if non_syn else "TRES PROBABLE"
             R.append(f"    >>> ROUTAGE ASYMETRIQUE {sev} (flow_tcp_non_syn_drop={non_syn_drop_val}) : "
                      "le firewall recoit du trafic hors-SYN (SYN parti par un autre chemin) et le DROP.")
+            R.append("        NB: ce compteur est GLOBAL (tous flux du firewall), pas filtre sur ce flux."
+                     " A correler avec les LOGS du flux (app ms-ds-smb + octets rx) : si le flux a du"
+                     " trafic ABOUTI, ces drops peuvent venir d'AUTRES flux.")
             R.append("        FIX: rendre le routage RETOUR symetrique (retour dst->src doit repasser")
             R.append("        par ce firewall). Contournement (baisse la securite TCP stateful): "
                      "'set deviceconfig setting tcp asymmetric-path bypass'.")
@@ -982,8 +985,13 @@ def headline(report_lines, policy_by_fw, has_traffic):
     policy_by_fw : dict {serial: res} (multi-firewall). Un seul firewall qui
     refuse suffit a casser le flux."""
     text = "\n".join(report_lines)
-    asym = ("ROUTAGE ASYMETRIQUE CONFIRME" in text or "ROUTAGE ASYMETRIQUE TRES PROBABLE" in text
-            or "Probable ROUTAGE ASYMETRIQUE" in text)
+    # Asymetrie issue des LOGS DU FLUX (diagnose) = fiable, specifique au flux.
+    asym_flow = "Probable ROUTAGE ASYMETRIQUE" in text
+    # Asymetrie issue des COMPTEURS FIREWALL = GLOBAUX (tous flux), pas filtres sur
+    # ce flux -> on ne s'y fie QUE s'il y a du trafic du flux (sinon = bruit de fond).
+    asym_global = ("ROUTAGE ASYMETRIQUE CONFIRME" in text
+                   or "ROUTAGE ASYMETRIQUE TRES PROBABLE" in text)
+    asym = asym_flow or (asym_global and has_traffic)
     bloque = _first_sev(text, "BLOQUE")
     probleme = _first_sev(text, "PROBLEME")
     if asym:
