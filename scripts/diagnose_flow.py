@@ -21,11 +21,68 @@ Usage:
 import argparse
 import datetime
 import json
+import os
 import re
 import socket
 
 from panorama_client import PanoramaClient
 from policy_engine import PolicyEngine, _members, _text, VSYS, LOCAL
+
+
+def save_evidence(report, logs, flow, verdict, save_dir, stamp):
+    """Archive le rapport + les LOGS BRUTS (preuve technique) dans un fichier
+    numerote (logs/diag_NNNN_...txt). Retourne le chemin."""
+    os.makedirs(save_dir, exist_ok=True)
+    nums = []
+    for f in os.listdir(save_dir):
+        m = re.match(r"diag_(\d+)_", f)
+        if m:
+            nums.append(int(m.group(1)))
+    n = (max(nums) + 1) if nums else 1
+    safe = re.sub(r"[^0-9A-Za-z]+", "_", flow).strip("_")[:60]
+    path = os.path.join(save_dir, f"diag_{n:04d}_{safe}.txt")
+
+    def field(e, *names):
+        for nm in names:
+            v = e.get(nm)
+            if v not in (None, "", "(vide)"):
+                return v
+        return "-"
+
+    out = []
+    out.append("=" * 70)
+    out.append("DIAGNOSTIC DE FLUX - PREUVE TECHNIQUE")
+    out.append("=" * 70)
+    out.append(f"Date       : {stamp}")
+    out.append(f"Flux       : {flow}")
+    out.append(f"CONCLUSION : {verdict}")
+    out.append("=" * 70)
+    out.append("")
+    out += report
+    out.append("")
+    out.append("=" * 70)
+    out.append("LOGS BRUTS (preuve - lignes de log reelles du firewall)")
+    out.append("=" * 70)
+    for lt in ("traffic", "threat", "url", "decryption"):
+        entries = logs.get(lt) or []
+        if isinstance(entries, dict):
+            continue
+        out.append(f"\n[{lt.upper()}] {len(entries)} entree(s)")
+        for i, e in enumerate(entries, 1):
+            out.append(
+                f"  #{i} time={field(e,'receive_time','time_generated','time_received')}"
+                f" device={field(e,'device_name','serial')}"
+                f" src={field(e,'src','source')} dst={field(e,'dst','destination')}"
+                f" dport={field(e,'dport','dstport','destination-port')}"
+                f" app={field(e,'app','application')} action={field(e,'action')}"
+                f" rule={field(e,'rule')}"
+                f" ser={field(e,'session_end_reason','session-end-reason')}"
+                f" tx={field(e,'bytes_sent','bytes-sent')} rx={field(e,'bytes_received','bytes-received')}")
+    out.append("=" * 70)
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+    return path
 
 # Sections de la decryption-rulebase (ordre d'evaluation), via target=serial
 DECRYPT_SECTIONS = [
@@ -1051,6 +1108,10 @@ def main():
     p.add_argument("--nlogs", type=int, default=100)
     p.add_argument("--timeout", type=int, default=300)
     p.add_argument("--json", dest="json_path")
+    p.add_argument("--save", action="store_true",
+                   help="Archiver le rapport + logs bruts (preuve) dans un fichier numerote")
+    p.add_argument("--save-dir", dest="save_dir", default="logs",
+                   help="Dossier de sauvegarde --save (defaut: logs/)")
     p.add_argument("--no-policy", dest="no_policy", action="store_true",
                    help="Ne pas evaluer la policy (config) - plus rapide")
     args = p.parse_args()
@@ -1275,6 +1336,14 @@ def main():
     print("=" * 60)
     print(f">>> CONCLUSION : {verdict}")
     print("=" * 60)
+
+    if args.save:
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            path = save_evidence(report, logs, flow, verdict, args.save_dir, stamp)
+            print(f"[OK] Preuve archivee -> {path}")
+        except Exception as e:
+            print(f"[WARN] sauvegarde --save echouee: {str(e).splitlines()[0]}")
 
     if args.json_path:
         with open(args.json_path, "w", encoding="utf-8") as f:

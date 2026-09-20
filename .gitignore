@@ -3,3 +3,6 @@ config-dev.json
 *.pyc
 __pycache__/
 .env
+
+# Evidence files from diagnose_flow --save (contain internal IPs/hostnames)
+logs/
