@@ -29,10 +29,11 @@ from panorama_client import PanoramaClient
 from policy_engine import PolicyEngine, _members, _text, VSYS, LOCAL
 
 
-def save_evidence(report, logs, flow, verdict_en, proof, save_dir, stamp):
-    """Archive le rapport + les LOGS BRUTS (preuve technique) dans un fichier
-    numerote (logs/diag_NNNN_...txt). Conclusion EN anglais (fichier partage).
-    Retourne le chemin."""
+def save_evidence(logs, policy_by_fw, flow, verdict_en, proof, save_dir, stamp):
+    """Write a fully ENGLISH, self-contained evidence file (logs/diag_NNNN_...txt)
+    built from the structured data: conclusion, a readable summary, per-firewall
+    policy, a 'how to read' guide, and the RAW firewall log lines. Meant to be
+    attached to a ticket shared across teams. Returns the path."""
     os.makedirs(save_dir, exist_ok=True)
     nums = []
     for f in os.listdir(save_dir):
@@ -50,6 +51,12 @@ def save_evidence(report, logs, flow, verdict_en, proof, save_dir, stamp):
                 return v
         return "-"
 
+    def clean(entries):
+        return entries if isinstance(entries, list) else []
+
+    traffic = clean(logs.get("traffic"))
+    threat = clean(logs.get("threat"))
+
     out = []
     out.append("=" * 70)
     out.append("FLOW DIAGNOSTIC - TECHNICAL EVIDENCE")
@@ -57,18 +64,62 @@ def save_evidence(report, logs, flow, verdict_en, proof, save_dir, stamp):
     out.append(f"Date       : {stamp}")
     out.append(f"Flow       : {flow}")
     out.append(f"CONCLUSION : {verdict_en}")
-    out.append(f"{proof}")
+    out.append(proof)
     out.append("=" * 70)
+
+    # --- Readable summary (aggregated) ---
     out.append("")
-    out += report
+    out.append("SUMMARY")
+    out.append("-" * 70)
+    if traffic:
+        by_action = tally(traffic, "action")
+        by_app = tally(traffic, "app", "application")
+        by_ser = tally(traffic, "session_end_reason", "session-end-reason")
+        by_rule = tally(traffic, "rule")
+        devices = tally(traffic, "device_name", "serial")
+        tx = sum(_int(e.get("bytes_sent")) for e in traffic)
+        rx = sum(_int(e.get("bytes_received")) for e in traffic)
+        out.append(f"  Traffic sessions : {len(traffic)}   actions={dict(by_action)}")
+        out.append(f"  Applications     : {dict(by_app)}")
+        out.append(f"  Session end      : {dict(by_ser)}")
+        out.append(f"  Bytes            : sent={tx}  received={rx}")
+        out.append(f"  Rules matched    : {', '.join(str(r) for r in by_rule)}")
+        out.append(f"  Firewalls (logs) : {', '.join(str(d) for d in devices)}")
+        if threat:
+            out.append(f"  Threat events    : {len(threat)}  {dict(tally(threat, 'threat', 'threatid', 'name'))}")
+    else:
+        out.append("  No traffic logs for this flow in the selected window.")
+
+    # --- Policy per firewall ---
+    if policy_by_fw:
+        out.append("")
+        out.append("POLICY (static rulebase evaluation, per firewall)")
+        out.append("-" * 70)
+        for fw, res in policy_by_fw.items():
+            st = (res or {}).get("status", "?")
+            rule = (res or {}).get("rule")
+            out.append(f"  {fw:20}: {st}" + (f"  (rule '{rule}')" if rule else ""))
+
+    # --- How to read ---
+    out.append("")
+    out.append("HOW TO READ THIS EVIDENCE")
+    out.append("-" * 70)
+    out.append("  The flow WORKS when the traffic log shows ALL of:")
+    out.append("    - Application = a real app (e.g. ms-ds-smbv3), NOT 'incomplete'")
+    out.append("    - Session End Reason = tcp-fin (clean close), NOT aged-out")
+    out.append("    - Bytes received > 0 (the server actually replied)")
+    out.append("  It DOES NOT work when: application=incomplete / session-end=aged-out /")
+    out.append("  no return bytes, OR the policy denies it on any firewall on the path.")
+    out.append("  NOTE: 'action=allow' alone only means the policy permitted the session,")
+    out.append("  NOT that data was transferred - always check the 3 fields above.")
+
+    # --- Raw logs ---
     out.append("")
     out.append("=" * 70)
-    out.append("RAW LOGS (evidence - actual firewall log lines)")
+    out.append("RAW LOGS (actual firewall log lines)")
     out.append("=" * 70)
     for lt in ("traffic", "threat", "url", "decryption"):
-        entries = logs.get(lt) or []
-        if isinstance(entries, dict):
-            continue
+        entries = clean(logs.get(lt))
         out.append(f"\n[{lt.upper()}] {len(entries)} entry(-ies)")
         for i, e in enumerate(entries, 1):
             out.append(
@@ -1391,7 +1442,7 @@ def main():
         try:
             verdict_en = headline_en(report, policy_by_fw, has_traffic)
             proof = proof_en(logs)
-            path = save_evidence(report, logs, flow, verdict_en, proof, args.save_dir, stamp)
+            path = save_evidence(logs, policy_by_fw, flow, verdict_en, proof, args.save_dir, stamp)
             print(f"[OK] Preuve archivee -> {path}")
         except Exception as e:
             print(f"[WARN] sauvegarde --save echouee: {str(e).splitlines()[0]}")
