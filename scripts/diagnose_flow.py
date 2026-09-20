@@ -235,15 +235,22 @@ def confirm_firewall_tcp(pano, serial, src, dst, port):
                 R.append(f"        {name} = {value}")
         else:
             R.append("    Compteurs d'asymetrie : aucun increment (relancer pendant que le flux tente).")
-        # Verdict
+        # Verdict : on pondere par l'AMPLEUR. Un delta de 1-2 paquets est negligeable
+        # (bruit) ; c'est une VRAIE asymetrie quand le drop est significatif (>=10).
         non_syn = any("non_syn" in n.lower() for n, _ in hits)
-        if hits and drop_mode:
+        non_syn_drop_val = max([int(v) for n, v in hits if "non_syn_drop" in n.lower()] + [0])
+        significant = non_syn_drop_val >= 10
+        if hits and drop_mode and significant:
             sev = "CONFIRME" if non_syn else "TRES PROBABLE"
-            R.append(f"    >>> ROUTAGE ASYMETRIQUE {sev} : le firewall recoit du trafic hors-SYN "
-                     "(SYN parti par un autre chemin) et le DROP (asymmetric-path=drop).")
+            R.append(f"    >>> ROUTAGE ASYMETRIQUE {sev} (flow_tcp_non_syn_drop={non_syn_drop_val}) : "
+                     "le firewall recoit du trafic hors-SYN (SYN parti par un autre chemin) et le DROP.")
             R.append("        FIX: rendre le routage RETOUR symetrique (retour dst->src doit repasser")
             R.append("        par ce firewall). Contournement (baisse la securite TCP stateful): "
                      "'set deviceconfig setting tcp asymmetric-path bypass'.")
+        elif hits and drop_mode:
+            R.append(f"    >>> Asymetrie MARGINALE (flow_tcp_non_syn_drop={non_syn_drop_val}, faible) : "
+                     "quelques paquets hors-session droppes, mais PAS le blocage principal. "
+                     "Si le flux fonctionne (app resolue, rx>0), c'est negligeable (sondes/retries).")
         elif hits and not drop_mode:
             R.append("    >>> Compteurs d'asymetrie presents mais asymmetric-path=bypass (tolere) -> "
                      "si le flux echoue, chercher ailleurs (serveur).")
@@ -774,11 +781,19 @@ def diagnose(logs_by_type, flow):
         # fins anormales (aged-out ou RST d'un cote) vs fin propre tcp-fin
         abnormal_ends = aged + rst_c + rst_s
         mixed_ends = sum(1 for x in (rst_c, rst_s, aged) if x > 0) >= 2
-        # Asymetrie probable si le flux est autorise ET majoritairement "stalled"
-        # (>=40%), OU si App-ID reste incomplet sur une part notable avec des fins
-        # anormales des deux cotes. Plus permissif que l'ancien seuil 50% + 2 RST.
+        # Une VRAIE application resolue (ex: ms-ds-smbv3) AVEC du trafic retour (rx>0)
+        # = le flux FONCTIONNE au moins en partie. Les 'incomplete'/'traceroute'
+        # (sondes, port 139, retries, nos traceroutes) NE doivent PAS faire conclure
+        # a un echec -> sinon faux positif "asymetrique" sur un flux qui marche.
+        PROBE_APPS = {"incomplete", "insufficient-data", "traceroute", "(vide)", ""}
+        real_app = {a: c for a, c in by_app.items()
+                    if a and str(a).lower() not in PROBE_APPS}
+        real_app_count = sum(real_app.values())
+        flow_works = real_app_count > 0 and rx > 0
+        # Asymetrie probable si le flux est autorise, PAS deja constate fonctionnel,
+        # ET majoritairement "stalled" (>=40%), OU App-ID incomplet + fins anormales.
         asym_signal = (
-            allow and total_sessions and (
+            allow and total_sessions and not flow_works and (
                 stalled_frac >= 0.40
                 or (incomplete >= 0.25 * total_sessions and mixed_ends)
                 or (aged >= 0.40 * total_sessions and abnormal_ends >= 0.5 * total_sessions)
@@ -799,8 +814,21 @@ def diagnose(logs_by_type, flow):
         else:
             asym = False
 
-        # apps suspectes (si deja explique par l'asymetrie, on n'ajoute pas de doublon)
-        if not asym:
+        # Le flux fonctionne (app reelle aboutie + octets recus) -> le dire clairement,
+        # meme s'il reste des sessions incomplete/traceroute (sondes/retries).
+        if flow_works:
+            note = ""
+            if stalled_frac >= 0.3:
+                note = (f" NB: {stalled}/{total_sessions} sessions incomplete/aged-out en plus "
+                        "(sondes port 139, traceroutes, retries) -> bruit, pas le vrai flux.")
+            findings.append(("OK",
+                f"Le flux FONCTIONNE : application {sorted(real_app.keys())} aboutie "
+                f"({real_app_count} sessions), octets recus rx={rx}.",
+                "une vraie application se complete avec du trafic retour du serveur." + note))
+
+        # apps suspectes (si deja explique par l'asymetrie ou si le flux marche,
+        # on n'ajoute pas de doublon bruyant)
+        if not asym and not flow_works:
             for app, expl in APP_SUSPECT.items():
                 if app in by_app:
                     findings.append(("SUSPECT", f"App '{app}' detectee", expl))
