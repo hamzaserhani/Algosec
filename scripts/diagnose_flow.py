@@ -991,16 +991,30 @@ def headline(report_lines, policy_by_fw, has_traffic):
     # ce flux -> on ne s'y fie QUE s'il y a du trafic du flux (sinon = bruit de fond).
     asym_global = ("ROUTAGE ASYMETRIQUE CONFIRME" in text
                    or "ROUTAGE ASYMETRIQUE TRES PROBABLE" in text)
-    asym = asym_flow or (asym_global and has_traffic)
+    # Preuve la plus forte : les LOGS DU FLUX montrent une vraie app aboutie + rx>0.
+    # Ca l'emporte sur le compteur firewall GLOBAL (qui compte les autres flux).
+    flow_ok = "Le flux FONCTIONNE" in text
     bloque = _first_sev(text, "BLOQUE")
     probleme = _first_sev(text, "PROBLEME")
-    if asym:
-        return ("NE FONCTIONNE PAS  -  ROUTAGE ASYMETRIQUE : le firewall autorise mais "
+    ASYM_MSG = ("NE FONCTIONNE PAS  -  ROUTAGE ASYMETRIQUE : le firewall autorise mais "
                 "droppe les paquets hors-session (aller/retour par des chemins differents).")
+    # 1. Refus explicite (policy-deny dans les logs du flux) -> bloque.
     if bloque:
         return f"NE FONCTIONNE PAS  -  {bloque}"
+    # 2. Le flux ABOUTIT (app reelle + octets retour) -> FONCTIONNE, on ignore le
+    #    compteur global d'asymetrie (bruit d'autres flux).
+    if flow_ok:
+        return "FONCTIONNE  -  le flux passe (application aboutie, serveur repond)."
+    # 3. Asymetrie specifique au flux (deduite de SES logs).
+    if asym_flow:
+        return ASYM_MSG
+    # 4. Autre probleme du flux.
     if probleme:
         return f"PROBLEME  -  {probleme}"
+    # 5. Asymetrie du compteur firewall GLOBAL : seulement si le flux a du trafic
+    #    ET qu'il n'a pas ete constate fonctionnel (sinon = bruit de fond).
+    if asym_global and has_traffic:
+        return ASYM_MSG
     if has_traffic:
         return "FONCTIONNE  -  le flux passe (serveur repond, aucune anomalie bloquante)."
     # Pas de trafic -> on se rabat sur la policy (config), agregee sur tous les firewalls.
