@@ -29,9 +29,10 @@ from panorama_client import PanoramaClient
 from policy_engine import PolicyEngine, _members, _text, VSYS, LOCAL
 
 
-def save_evidence(report, logs, flow, verdict, save_dir, stamp):
+def save_evidence(report, logs, flow, verdict_en, proof, save_dir, stamp):
     """Archive le rapport + les LOGS BRUTS (preuve technique) dans un fichier
-    numerote (logs/diag_NNNN_...txt). Retourne le chemin."""
+    numerote (logs/diag_NNNN_...txt). Conclusion EN anglais (fichier partage).
+    Retourne le chemin."""
     os.makedirs(save_dir, exist_ok=True)
     nums = []
     for f in os.listdir(save_dir):
@@ -51,23 +52,24 @@ def save_evidence(report, logs, flow, verdict, save_dir, stamp):
 
     out = []
     out.append("=" * 70)
-    out.append("DIAGNOSTIC DE FLUX - PREUVE TECHNIQUE")
+    out.append("FLOW DIAGNOSTIC - TECHNICAL EVIDENCE")
     out.append("=" * 70)
     out.append(f"Date       : {stamp}")
-    out.append(f"Flux       : {flow}")
-    out.append(f"CONCLUSION : {verdict}")
+    out.append(f"Flow       : {flow}")
+    out.append(f"CONCLUSION : {verdict_en}")
+    out.append(f"{proof}")
     out.append("=" * 70)
     out.append("")
     out += report
     out.append("")
     out.append("=" * 70)
-    out.append("LOGS BRUTS (preuve - lignes de log reelles du firewall)")
+    out.append("RAW LOGS (evidence - actual firewall log lines)")
     out.append("=" * 70)
     for lt in ("traffic", "threat", "url", "decryption"):
         entries = logs.get(lt) or []
         if isinstance(entries, dict):
             continue
-        out.append(f"\n[{lt.upper()}] {len(entries)} entree(s)")
+        out.append(f"\n[{lt.upper()}] {len(entries)} entry(-ies)")
         for i, e in enumerate(entries, 1):
             out.append(
                 f"  #{i} time={field(e,'receive_time','time_generated','time_received')}"
@@ -1037,55 +1039,102 @@ def _first_sev(text, sev):
     return m.group(1).strip() if m else None
 
 
-def headline(report_lines, policy_by_fw, has_traffic):
-    """Conclusion en UNE ligne (lisible par une autre equipe) : ✅ / ⚠️ / ❌.
-    policy_by_fw : dict {serial: res} (multi-firewall). Un seul firewall qui
-    refuse suffit a casser le flux."""
+def _classify(report_lines, policy_by_fw, has_traffic):
+    """Categorise le verdict (independant de la langue) -> (key, extra).
+    Preuve la plus forte = LOGS DU FLUX (app aboutie + rx) ; l'emporte sur le
+    compteur firewall GLOBAL (qui compte les autres flux)."""
     text = "\n".join(report_lines)
-    # Asymetrie issue des LOGS DU FLUX (diagnose) = fiable, specifique au flux.
+    flow_ok = "Le flux FONCTIONNE" in text
     asym_flow = "Probable ROUTAGE ASYMETRIQUE" in text
-    # Asymetrie issue des COMPTEURS FIREWALL = GLOBAUX (tous flux), pas filtres sur
-    # ce flux -> on ne s'y fie QUE s'il y a du trafic du flux (sinon = bruit de fond).
     asym_global = ("ROUTAGE ASYMETRIQUE CONFIRME" in text
                    or "ROUTAGE ASYMETRIQUE TRES PROBABLE" in text)
-    # Preuve la plus forte : les LOGS DU FLUX montrent une vraie app aboutie + rx>0.
-    # Ca l'emporte sur le compteur firewall GLOBAL (qui compte les autres flux).
-    flow_ok = "Le flux FONCTIONNE" in text
     bloque = _first_sev(text, "BLOQUE")
     probleme = _first_sev(text, "PROBLEME")
-    ASYM_MSG = ("NE FONCTIONNE PAS  -  ROUTAGE ASYMETRIQUE : le firewall autorise mais "
-                "droppe les paquets hors-session (aller/retour par des chemins differents).")
-    # 1. Refus explicite (policy-deny dans les logs du flux) -> bloque.
     if bloque:
-        return f"NE FONCTIONNE PAS  -  {bloque}"
-    # 2. Le flux ABOUTIT (app reelle + octets retour) -> FONCTIONNE, on ignore le
-    #    compteur global d'asymetrie (bruit d'autres flux).
+        return ("BLOCKED_LOG", bloque)
     if flow_ok:
-        return "FONCTIONNE  -  le flux passe (application aboutie, serveur repond)."
-    # 3. Asymetrie specifique au flux (deduite de SES logs).
+        return ("WORKS", None)
     if asym_flow:
-        return ASYM_MSG
-    # 4. Autre probleme du flux.
+        return ("ASYM", None)
     if probleme:
-        return f"PROBLEME  -  {probleme}"
-    # 5. Asymetrie du compteur firewall GLOBAL : seulement si le flux a du trafic
-    #    ET qu'il n'a pas ete constate fonctionnel (sinon = bruit de fond).
+        return ("PROBLEM", probleme)
     if asym_global and has_traffic:
-        return ASYM_MSG
+        return ("ASYM", None)
     if has_traffic:
-        return "FONCTIONNE  -  le flux passe (serveur repond, aucune anomalie bloquante)."
-    # Pas de trafic -> on se rabat sur la policy (config), agregee sur tous les firewalls.
+        return ("WORKS", None)
     statuses = {fw: (res or {}).get("status") for fw, res in (policy_by_fw or {}).items()}
     blocked = [fw for fw, st in statuses.items() if st in ("NO_MATCH", "BLOCKED")]
     allowed = [fw for fw, st in statuses.items() if st == "ALLOWED"]
     if blocked:
-        return (f"BLOQUE PAR LA POLICY sur : {', '.join(blocked)} (aucun trafic observe) "
-                "- un seul firewall qui refuse suffit a casser le flux.")
+        return ("BLOCKED_POLICY", ", ".join(blocked))
     if allowed:
-        return (f"AUTORISE PAR LA POLICY sur {', '.join(allowed)} mais AUCUN trafic observe "
-                "-> flux pas encore tente, ou n'atteint pas ces firewalls (elargir --days).")
-    return ("INDETERMINE  -  aucun log sur la fenetre et policy non concluante "
-            "(elargir --days, ou verifier que ce sont les bons firewalls).")
+        return ("ALLOWED_NOTRAFFIC", ", ".join(allowed))
+    return ("INDETERMINATE", None)
+
+
+def _verdict(report_lines, policy_by_fw, has_traffic, lang="fr"):
+    key, extra = _classify(report_lines, policy_by_fw, has_traffic)
+    fr = {
+        "BLOCKED_LOG": f"NE FONCTIONNE PAS  -  {extra}",
+        "WORKS": "FONCTIONNE  -  le flux passe (application aboutie, serveur repond).",
+        "ASYM": ("NE FONCTIONNE PAS  -  ROUTAGE ASYMETRIQUE : le firewall autorise mais "
+                 "droppe les paquets hors-session (aller/retour par des chemins differents)."),
+        "PROBLEM": f"PROBLEME  -  {extra}",
+        "BLOCKED_POLICY": (f"BLOQUE PAR LA POLICY sur : {extra} (aucun trafic observe) - "
+                           "un seul firewall qui refuse suffit a casser le flux."),
+        "ALLOWED_NOTRAFFIC": (f"AUTORISE PAR LA POLICY sur {extra} mais AUCUN trafic observe -> "
+                              "flux pas encore tente, ou n'atteint pas ces firewalls (elargir --days)."),
+        "INDETERMINATE": ("INDETERMINE  -  aucun log sur la fenetre et policy non concluante "
+                          "(elargir --days, ou verifier que ce sont les bons firewalls)."),
+    }
+    en = {
+        "BLOCKED_LOG": "DOES NOT WORK  -  blocked (policy deny / default-deny). See report.",
+        "WORKS": "WORKS  -  the flow completes (application resolved, server responds).",
+        "ASYM": ("DOES NOT WORK  -  ASYMMETRIC ROUTING: the firewall permits the flow but drops "
+                 "the out-of-session packets (forward and return take different paths)."),
+        "PROBLEM": "PROBLEM  -  see report (reset / decryption / no server response).",
+        "BLOCKED_POLICY": (f"BLOCKED BY POLICY on: {extra} (no traffic observed) - "
+                           "a single firewall denying is enough to break the flow."),
+        "ALLOWED_NOTRAFFIC": (f"ALLOWED BY POLICY on {extra} but NO traffic observed -> "
+                              "flow not attempted yet, or does not reach these firewalls (widen --days)."),
+        "INDETERMINATE": ("INDETERMINATE  -  no logs in the window and policy inconclusive "
+                          "(widen --days, or check these are the right firewalls)."),
+    }
+    return (en if lang == "en" else fr)[key]
+
+
+def headline(report_lines, policy_by_fw, has_traffic):
+    """Conclusion FR en UNE ligne (console)."""
+    return _verdict(report_lines, policy_by_fw, has_traffic, "fr")
+
+
+def headline_en(report_lines, policy_by_fw, has_traffic):
+    """Conclusion EN en UNE ligne (fichier de preuve partage)."""
+    return _verdict(report_lines, policy_by_fw, has_traffic, "en")
+
+
+def proof_en(logs):
+    """Ligne de PREUVE en anglais, derivee des logs traffic reels."""
+    tr = logs.get("traffic") or []
+    if isinstance(tr, dict) or not tr:
+        return "EVIDENCE: no traffic logs for this flow in the window."
+    apps, actions, rx = {}, set(), 0
+    for e in tr:
+        a = str(e.get("app") or e.get("application") or "").lower()
+        apps[a] = apps.get(a, 0) + 1
+        if e.get("action"):
+            actions.add(e["action"])
+        try:
+            rx += int(e.get("bytes_received") or e.get("bytes-received") or 0)
+        except (ValueError, TypeError):
+            pass
+    probe = {"incomplete", "insufficient-data", "traceroute", "", "(vide)"}
+    real = sorted(a for a in apps if a and a not in probe)
+    if real and rx > 0:
+        return (f"EVIDENCE: application(s) {real} completed, action={sorted(actions)}, "
+                f"bytes_received={rx} > 0  ->  the flow WORKS.")
+    return (f"EVIDENCE: apps={apps}, no completed application and low/no return bytes "
+            f"(bytes_received={rx})  ->  the flow does NOT complete.")
 
 
 def main():
@@ -1340,7 +1389,9 @@ def main():
     if args.save:
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
-            path = save_evidence(report, logs, flow, verdict, args.save_dir, stamp)
+            verdict_en = headline_en(report, policy_by_fw, has_traffic)
+            proof = proof_en(logs)
+            path = save_evidence(report, logs, flow, verdict_en, proof, args.save_dir, stamp)
             print(f"[OK] Preuve archivee -> {path}")
         except Exception as e:
             print(f"[WARN] sauvegarde --save echouee: {str(e).splitlines()[0]}")
